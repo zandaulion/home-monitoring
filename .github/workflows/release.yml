@@ -1,0 +1,37 @@
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+  draft:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - name: Require a tag on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Build the bundle
+        run: python scripts/build_release.py --version "$GITHUB_REF_NAME" --output dist
+      - name: Check the bundle's hash
+        run: sha256sum --check SHA256SUMS
+        working-directory: dist
+      - name: Install the bundle in a clean environment
+        run: python scripts/verify_release.py "dist/home-monitoring-$GITHUB_REF_NAME.zip"
+      # A person reviews the draft and publishes it; see docs/RELEASING.md.
+      - name: Create a draft release
+        run: gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag --generate-notes --title "$GITHUB_REF_NAME"
+        env:
+          GH_TOKEN: ${{ github.token }}

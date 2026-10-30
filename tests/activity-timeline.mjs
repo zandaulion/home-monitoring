@@ -23,7 +23,7 @@ assert.equal(bins[0].unknown,1);
 assert.deepEqual(clippedSpan(0,150,100,200),{left:0,width:50});
 assert.equal(clippedSpan(200,220,100,200),null);
 assert.deepEqual(clippedSpan(150,150,100,200),{left:50,width:0});
-process.env.TZ = 'Europe/Bucharest';
+process.env.TZ = 'Europe/Paris';
 const [fallStart,fallEnd] = dayBounds('2026-10-25');
 assert.equal(fallEnd-fallStart,25*3600);
 assert.equal(hourlyBins([],fallStart,fallEnd).length,25);

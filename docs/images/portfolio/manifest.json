@@ -5,25 +5,25 @@
       "file": "desktop.png",
       "width": 1440,
       "height": 1000,
-      "sha256": "256c9ba2dbcff2e75dc7436713723ac6cb8f8055bf9de76fe41c9ca943b8ffa0"
+      "sha256": "d419e93eebad0f3c4cbdebfef9eb9c003f42212620107a349a3645419e0b73e1"
     },
     {
       "file": "tablet.png",
       "width": 834,
       "height": 1112,
-      "sha256": "4da21716f1678439b35596b05638e9782573b4dd2b70541f0a11122725fb6986"
+      "sha256": "1f14c0771a8de835bcea07d712e01df7cbd6bb7c04e131561815eaa939eb0c2b"
     },
     {
       "file": "mobile.png",
       "width": 390,
       "height": 844,
-      "sha256": "4f9cb6c0e1f9a0a809e18fedf00679b2e3a5f710199a1cd10bd313b329c21f70"
+      "sha256": "9de4ed35c43b9accbb7bb9121450cca0ce0f6639defcbd0a6d6bce6e9db4ca7b"
     },
     {
       "file": "activity.png",
       "width": 1440,
       "height": 1000,
-      "sha256": "89e51400ebb081fa90386a1589ea56d80cb91143459bf42e438f0d7739a00641"
+      "sha256": "9663c028c36685e897af490dc46205d1a32b365db0c4a1c0677ea6ce097dd5fc"
     }
   ]
 }

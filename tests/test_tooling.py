@@ -89,3 +89,9 @@ def test_collector_presence_reads_only_answering_neighbours(tmp_path):
     table = tmp_path / "arp"
     table.write_text("IP address HW type Flags HW address Mask Device\n192.0.2.20 0x1 0x2 AA:BB:CC:00:00:01 * eth0\n192.0.2.21 0x1 0x0 00:00:00:00:00:00 * eth0\n")
     assert neighbours(table) == {"aa:bb:cc:00:00:01"}
+
+
+def test_release_workflow_creates_only_a_draft_after_checks():
+    workflow=(ROOT/'.github/workflows/release.yml').read_text()
+    assert 'needs: checks' in workflow and '--draft' in workflow and 'verify_release.py' in workflow
+    assert 'workflow_call' in (ROOT/'.github/workflows/checks.yml').read_text()

@@ -142,7 +142,7 @@ The collector needs only Pillow and a private config:
   "motion_fraction": 0.015,
   "cameras": [{
     "id": "camera-1",
-    "snapshot_url": "http://192.0.2.10:6688/snapshot/PROFILE_000",
+    "snapshot_url": "http://192.0.2.10/snapshot.jpg",
     "username": "EXAMPLE_USER",
     "password": "EXAMPLE_PASSWORD"
   }]

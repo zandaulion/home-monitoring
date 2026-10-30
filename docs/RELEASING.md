@@ -3,27 +3,34 @@
 A release is a source kit for a fresh installation, not an installer with private
 credentials, a model-weight distribution, or a backup of a live deployment.
 
-1. Run the Python and JavaScript tests and regenerate the synthetic screenshots.
+Pushing a version tag from `main` starts `.github/workflows/release.yml`. It runs
+every check, builds the bundle, verifies its hash, installs it into a clean
+environment with `scripts/verify_release.py`, and creates a **draft** release. The
+automation cannot judge privacy or real-world behaviour, so a person finishes it.
+
+1. Run the checks, regenerate the synthetic screenshots, and commit to `main`.
 2. Review the exact outgoing diff, preview artwork, screenshot manifest and
    author/committer metadata. Check any local production configuration and data
-   for accidental copied values without printing secrets into logs.
-3. Stage the intended files explicitly, run `python scripts/check_publish.py
-   --staged`, and commit. Review `git show --format=fuller --stat HEAD` and
-   `python scripts/check_publish.py --ref HEAD`.
-4. Build from that exact commit:
+   for accidental copied values without printing secrets into logs. Review
+   `git show --format=fuller --stat HEAD` and `python scripts/check_publish.py
+   --ref HEAD`.
+3. Tag and push the reviewed commit:
 
    ```sh
-   python scripts/build_release.py --version v0.1.0
-   cd dist
-   sha256sum --check SHA256SUMS
+   git tag v0.2.0
+   git push origin v0.2.0
    ```
 
-5. Extract the ZIP into a clean temporary directory. Follow the root README's
-   demo instructions using a fresh virtual environment. Test generated server
-   and collector config in isolation; keep real credentials out of the bundle.
-6. Publish the source commit/tag, curated ZIP, checksum and release notes only
-   when publishing is within the user's authorized task. Verify the remote
-   commit and downloaded artifact against the reviewed source and local hash.
+4. When the Release workflow finishes, open the draft on GitHub, write its notes,
+   and compare the attached checksum with a local build of the same commit:
+
+   ```sh
+   python scripts/build_release.py --version v0.2.0
+   cat dist/SHA256SUMS
+   ```
+
+5. Publish the draft only when publishing is within the user's authorized task.
+   Published releases are public immediately.
 
 The builder reads committed Git blobs, never the working directory. Private and
 runtime directories are rejected by the guard. A bundle includes `BUILD-INFO.json`
