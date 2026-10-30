@@ -1,0 +1,12 @@
+{
+  "server_url": "https://private.example.invalid",
+  "collector_token": "SAME_RANDOM_COLLECTOR_SECRET_AS_SERVER",
+  "interval_seconds": 2,
+  "motion_fraction": 0.015,
+  "cameras": [{
+    "id": "camera-1",
+    "snapshot_url": "http://192.0.2.10:6688/snapshot/PROFILE_000",
+    "username": "EXAMPLE_USER",
+    "password": "EXAMPLE_PASSWORD"
+  }]
+}

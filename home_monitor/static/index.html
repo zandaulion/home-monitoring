@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#1c3029">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Home Monitor">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
+  <title>Home · Home Monitor</title>
+  <link rel="stylesheet" href="/assets/style.css">
+  <script src="/assets/app.js" type="module"></script>
+</head>
+<body>
+  <section class="activation-wrap" id="activation" hidden aria-labelledby="activation-title">
+    <div class="activation-card"><img src="/icons/icon.svg" width="72" height="72" alt="Home Monitor"><div class="eyebrow">A PRIVATE VIEW OF HOME</div><h1 id="activation-title">Welcome home.</h1><p id="activation-description">Activate this device with an invitation from your administrator to view your home.</p><form id="activation-form"><label>Invitation code<input name="code" id="invite-code" required maxlength="40" placeholder="ABCD-EFGH-JKLM" autocomplete="off" autocapitalize="characters" spellcheck="false"></label><p id="activation-error" class="activation-error" role="alert" hidden></p><button class="button" type="submit">Activate this device</button></form><p class="modal-note">Installing on iPhone? Add to Home Screen, then enter the code in the installed app. Opening a link does not use the invitation.</p><button class="button secondary install-trigger" type="button">Install Home Monitor</button><button class="text-link owner-access" id="cancel-activation" type="button" hidden>Continue with existing owner access</button></div>
+  </section>
+  <div id="dashboard" hidden>
+  <aside class="sidebar">
+    <a class="brand" href="#overview"><span class="brand-mark">⌂</span><span>Home Monitor<small>A little peace of mind.</small></span></a>
+    <div class="nav-label">YOUR HOME</div>
+    <nav aria-label="Main navigation">
+      <a href="#overview" data-page="overview"><span>▦</span> Overview</a>
+      <a href="#events" data-page="events"><span>◷</span> Activity</a>
+      <a href="#people" data-page="people"><span>♙</span> People <span class="nav-count" id="people-count">0</span></a>
+      <a href="#settings" data-page="settings"><span>⚙</span> Settings</a>
+    </nav>
+    <div class="sidebar-foot"><span class="status-dot"></span> Private connection<small>Access restricted to activated devices.</small></div>
+  </aside>
+  <main>
+    <header class="topbar"><span id="breadcrumb">Your home / Overview</span><div><button type="button" class="button secondary install-trigger">Install app</button><span class="connection" id="connection">Connecting…</span><span class="avatar">⌂</span></div></header>
+    <div class="content">
+      <div id="error-banner" class="banner error" hidden role="alert"></div>
+      <div class="banner" id="alert-controls"><div><strong id="alert-mode">Alerts active</strong><p>Snooze alerts on all devices while you are in the yard. Activity recording continues.</p></div><div class="alert-actions"><label for="snooze-duration">Snooze for</label><select id="snooze-duration"><option value="30">30 minutes</option><option value="60" selected>1 hour</option><option value="120">2 hours</option><option value="240">4 hours</option><option value="480">8 hours</option></select><button class="button secondary" id="snooze-alerts">Snooze alerts</button><button class="button secondary" id="resume-alerts" hidden>Resume alerts</button></div></div>
+      <section id="page-overview" class="page">
+        <div class="page-heading"><div><div class="eyebrow" id="today">YOUR HOME, AT A GLANCE</div><h1>A clearer picture of home.</h1><p>Your cameras, familiar faces, and the moments that matter.</p></div><button class="button secondary" id="refresh-button">↻ Refresh</button></div>
+        <div id="enrollment-banner" class="banner onboarding" hidden><div><strong>Let’s put names to familiar faces.</strong><p>Add your household to start recognising people. Until then, clear faces appear as unrecognised.</p></div><a class="button" href="#people">Add your first person <span>↗</span></a></div>
+        <div id="paused-banner" class="banner" hidden>Monitoring is paused. Resume it in Settings to capture new snapshots.</div>
+        <div class="stats" id="stats"></div>
+        <div class="section-heading"><div><h2>Your cameras <span class="subtle" id="camera-total">0</span></h2><p>Sampled snapshots · continuous recordings stay on the camera cards</p></div><span class="pill quiet" id="sampling-label">Motion-aware</span></div>
+        <div class="camera-grid" id="camera-grid"></div>
+        <div class="section-heading activity-heading"><div><h2>Recent activity</h2><p>A timeline of people seen around your home.</p></div><a class="text-link" href="#events">View all activity ↗</a></div>
+        <div id="recent-events" class="event-list"></div>
+      </section>
+      <section id="page-events" class="page" hidden>
+        <div class="page-heading"><div><div class="eyebrow">A RECORD OF THE EVERYDAY</div><h1>Activity</h1><p>Recognised faces, unfamiliar visitors, and people passing through.</p></div></div>
+        <div class="filters"><label>Camera<select id="camera-filter"><option value="">All cameras</option></select></label><label>Recognition<select id="state-filter"><option value="">All activity</option><option value="known">Recognised</option><option value="unknown">Unrecognised face</option><option value="unavailable">Face unavailable</option></select></label></div>
+        <p class="subtle">Timeline groups activity from the same camera with gaps of up to 10 minutes. Expand a period to review individual snapshots. Groups reflect the activity loaded and your filters.</p><button class="button secondary" id="refresh-activity">Refresh latest activity</button><div class="event-list" id="all-events"></div><button class="button secondary load-more" id="load-more" hidden>Load earlier activity</button>
+      </section>
+      <section id="page-people" class="page" hidden>
+        <div class="page-heading"><div><div class="eyebrow">THE FAMILIAR FACES</div><h1>People</h1><p>A private face library for the people you choose to enrol.</p></div><button class="button" id="add-person">＋ Add person</button></div>
+        <div class="people-grid" id="people-grid"></div>
+        <div class="help-panel"><span class="help-icon">◎</span><div><h3>A few good photos go a long way.</h3><p>Start with 3–5 clear photos per person. Include different lighting and slight changes in angle. Add photos with one visible face, and enrol people who agree to be included. You can also identify a clear face from an activity event.</p><p>Recognition is an estimate. A turned-away or blurred face stays unidentified.</p></div></div>
+      </section>
+      <section id="page-settings" class="page" hidden>
+        <div class="page-heading"><div><div class="eyebrow">MAKE IT YOURS</div><h1>Settings</h1><p>Keep just what you need, for as long as you need it.</p></div></div>
+        <form id="settings-form" class="settings-panel">
+          <h2>Monitoring & retention</h2>
+          <label class="toggle-row"><span><strong>Monitoring enabled</strong><small>Pause snapshot capture and recognition. Camera SD recording is unaffected.</small></span><input type="checkbox" name="monitoring_enabled"></label>
+          <div class="form-grid"><label>Keep activity for (days)<input type="number" name="retention_days" min="1" max="90" required><small>Older event images and history are deleted automatically.</small></label><label>Maximum event storage (MB)<input type="number" name="storage_limit_mb" min="50" max="10240" required><small>Oldest events are removed first. Face enrolments are kept separately.</small></label></div>
+          <label>Minimum minutes between alerts per camera<input type="number" name="alert_cooldown_minutes" min="1" max="60" required><small>Repeated unrecognised-face alerts are limited to this interval. Activity is still recorded.</small></label>
+          <label>Face matching threshold<input type="number" name="recognition_threshold" min="0.45" max="0.85" step="0.01" required><small>A higher value makes matching stricter. This is a similarity threshold, not a probability.</small></label>
+          <div class="form-footer"><p>Changes apply immediately. Lowering retention may delete older events.</p><button class="button secondary" type="button" id="discard-settings">Discard edits</button><button class="button" type="submit">Save settings</button></div>
+        </form>
+        <div class="settings-panel"><h2>Camera names</h2><div id="camera-settings"></div></div>
+        <div class="settings-panel"><h2>Home Monitor on your home screen</h2><p>Install the app for its own icon and window. Use an internet connection to load cameras and activity. Offline, the app opens its interface without saving camera or face images on this device.</p><button type="button" class="button secondary install-trigger">Install Home Monitor</button></div>
+        <div class="settings-panel"><h2>Notifications on this device</h2><p>Receive alerts for unrecognised faces even when Home Monitor is closed. Enrol at least one person first; alerts require repeated observations and are limited by the cooldown above. On iPhone or iPad, enable notifications from the installed Home Screen app.</p><button type="button" class="button secondary" id="notifications-button">Enable notifications</button> <button type="button" class="button secondary" id="test-notifications" hidden>Send test notification</button><p id="notifications-status" class="subtle"></p><p>Alerts contain no camera images or names. Internet access is needed for delivery; open the app to enable notifications and review activity.</p></div>
+        <div class="settings-panel"><h2>Your data stays under your control</h2><p>The collector sends selected snapshots to your recognition server over an encrypted Tailscale connection. Recognition runs on your server. Continuous video stays on your cameras’ SD cards.</p><p>No face-recognition API, third-party analytics, or public camera links are used. This dashboard requires an activated device, or your private owner connection.</p><div class="storage-meter"><div id="storage-bar"></div></div><p id="storage-detail" class="subtle"></p></div>
+      </section>
+      <footer class="page-footer"><span>Home Monitor</span><span>Recognition helps you review activity. Always verify unexpected results.</span></footer>
+    </div>
+  </main>
+  </div>
+  <dialog id="modal"><div class="modal-top"><h2 id="modal-title"></h2><button class="icon-button" id="close-modal" aria-label="Close dialog">×</button></div><div id="modal-body"></div></dialog>
+  <div id="toast" role="status" hidden></div>
+</body>
+</html>

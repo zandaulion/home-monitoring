@@ -1,0 +1,22 @@
+[Unit]
+Description=Private monitoring dashboard and recognition
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace /srv/home-monitoring with the absolute checkout path.
+WorkingDirectory=/srv/home-monitoring
+Environment=HOME_MONITOR_CONFIG=/srv/home-monitoring/.runtime/config.json
+Environment=OMP_NUM_THREADS=2
+Environment=OPENBLAS_NUM_THREADS=1
+ExecStart=/srv/home-monitoring/.venv/bin/python -m uvicorn home_monitor.app:create_app --factory --host 127.0.0.1 --port 8840 --no-proxy-headers --no-access-log
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+MemoryMax=1536M
+CPUQuota=150%
+
+[Install]
+WantedBy=default.target

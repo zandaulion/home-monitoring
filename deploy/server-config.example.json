@@ -1,0 +1,17 @@
+{
+  "data_dir": "/srv/home-monitor/private/data",
+  "model_dir": "/srv/home-monitoring/.runtime/models",
+  "owner_login": "owner@example.invalid",
+  "collector_token": "REPLACE_WITH_A_RANDOM_SECRET",
+  "admin_token": "REPLACE_WITH_A_DIFFERENT_RANDOM_SECRET",
+  "console_admin_token": "REPLACE_WITH_ANOTHER_RANDOM_SECRET",
+  "public_origin": "https://monitor.example.invalid",
+  "public_base_url": "https://monitor.example.invalid",
+  "allowed_origins": [
+    "https://monitor.example.invalid",
+    "https://private.example.invalid",
+    "https://console.example.invalid"
+  ],
+  "sampling_seconds": 2,
+  "cameras": [{"id": "camera-1", "name": "Example camera"}]
+}

@@ -1,0 +1,11 @@
+{
+  "id": "home-monitor",
+  "name": "Home Monitor",
+  "description": "Camerele de acasă, recunoașterea persoanelor și istoricul activității",
+  "icon": "icons/apps/home-monitor.svg",
+  "api": "/home-monitor",
+  "invite_kind": "device",
+  "push": true,
+  "invite_note": "Acces la camere, istoric și biblioteca de persoane. Codul expiră în {days} zile; în prima oră poate fi refolosit pentru a muta accesul în aplicația instalată.",
+  "message": "Salut! Îți trimit acces la Home Monitor — camerele de acasă și recunoașterea persoanelor.\n\n1) Deschide linkul:\n{link}\n\n2) Instalează aplicația: Android, butonul Instalează sau meniul ⋮ → Adaugă la ecranul principal; iPhone, Safari → Partajare → Adaugă la ecranul principal.\n\n3) Deschide aplicația instalată și introdu codul din link. Apasă Activează.\n\n4) În Setări, activează notificările și trimite o notificare de test. Poți primi alerte și când aplicația este închisă.\n\nInvitația este valabilă {days} zile."
+}

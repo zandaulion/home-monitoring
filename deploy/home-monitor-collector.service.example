@@ -1,0 +1,18 @@
+[Unit]
+Description=Camera snapshot collector
+After=network-online.target
+
+[Service]
+Type=simple
+# Replace /srv/home-monitoring with the absolute checkout path.
+ExecStart=/usr/bin/flock -n -E 0 /srv/home-monitoring/.runtime/collector.lock /srv/home-monitoring/.venv/bin/python /srv/home-monitoring/collector.py --config /srv/home-monitoring/.runtime/collector-config.json
+Restart=on-failure
+RestartSec=10
+UMask=0077
+NoNewPrivileges=true
+Nice=10
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=default.target
