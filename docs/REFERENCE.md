@@ -7,9 +7,9 @@ to the monitoring server.
 ## Components
 
 - `collector.py`: runs near the cameras. Samples their authenticated ONVIF
-  snapshot URLs every two seconds, compares small grayscale images using Pillow,
+  snapshot URLs every two seconds (every second during movement), compares small grayscale images using Pillow,
   and uploads frames during movement plus a periodic frame every 15 seconds.
-  Frames are kept in RAM on the collector. After movement, a short sampling burst
+  Frames are kept in RAM on the collector. After movement, the faster sampling
   helps capture multiple views of a face.
 - `home_monitor`: FastAPI service, SQLite event history, bounded snapshot storage,
   and a responsive dashboard. YOLOX-Nano detects people, YuNet detects faces, and
@@ -149,6 +149,12 @@ The collector needs only Pillow and a private config:
 }
 ```
 
+Optional keys: `active_interval_seconds` sets sampling during movement (default 1),
+and `presence` enables automatic Away with synthetic values such as
+`{"subnet": "192.0.2.0/24", "macs": ["02:00:00:00:00:01"]}`. Sleeping phones may
+answer late, so `grace_seconds` (default 900) sets how long a phone must be silent
+before it counts as gone. Addresses stay in this file and never reach the server.
+
 Run `python collector.py --config /path/to/private-config.json`. Install as a
 user service with automatic restart. Where user lingering is unavailable, use
 a user cron boot/periodic watchdog and a shared `flock` lock to prevent duplicate
@@ -195,7 +201,28 @@ Subscription endpoints and their keys are private and never enter API responses,
 source control, the PWA cache, or application logs. Only recognised browser push
 service hosts on HTTPS port 443 are accepted as delivery endpoints.
 
-Unidentified-person alerts include unrecognised faces, missing or unclear faces,
+**Person-only mode.** Settings can turn face recognition off for cameras that
+cannot resolve faces. Faces are then neither detected nor stored, events have a
+single `person` state, and each person alert fires on the first observation
+because a fast intruder may only appear once. Enrolled samples are kept unused;
+remove them from the face library if they are no longer wanted.
+
+**When alerts fire.** Person alerts can be always on, limited to a daily schedule
+in the time zone of the device that saved it, or off. A schedule can cross
+midnight. Away mode turns alerts on regardless, from the app's Away button or
+automatically when no listed phone has been on the home network for 15 minutes.
+The presence report is a single yes or no; a report older than five minutes is
+ignored. Snooze still applies on top of these. Recognised activity never alerts.
+
+**Camera offline alerts.** Every device is told once when a camera sends no
+snapshot for five minutes, and once when it returns. If all cameras stop, one
+message covers them. These alerts name the camera, ignore snooze, and stop while
+monitoring is paused. They come from the server, so a stopped server cannot
+report itself.
+
+**Tapping an alert** opens that event. Person alerts carry its opaque identifier.
+
+With recognition on, unidentified-person alerts include unrecognised faces, missing or unclear faces,
 and groups where not everyone is identified. They require two person observations
 on the same camera less than 20 seconds apart, with no intervening empty or fully
 recognised frame. An enrolled face library is not required; fully recognised
@@ -232,7 +259,7 @@ push-service acceptance per event across devices, not confirmation that a phone
 displayed a notification. These histories follow activity retention limits.
 
 A SQLite outbox survives restarts, retries transient failures up to three
-times, and expires alerts after two minutes. Cancelled/corrected/deleted events
+times, and expires alerts after 15 minutes. Cancelled/corrected/deleted events
 and paused monitoring stop pending activity alerts. Missing/expired subscriptions
 are removed on 404/410. The test button targets only the current device and is
 limited to one request per 30 seconds. Server acceptance is not proof that an OS
@@ -240,6 +267,9 @@ displayed a notification; use a test on the actual phone to verify permission an
 background delivery.
 
 ## Retention and privacy
+
+Each event keeps up to five photos at least two seconds apart, replacing the
+weakest with better frames; the largest, sharpest view is shown first.
 
 Defaults: seven days and 2 GB for event images. A minute-by-minute cleanup removes
 the oldest events when either bound is reached, including corresponding metadata

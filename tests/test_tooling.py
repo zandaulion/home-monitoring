@@ -82,3 +82,10 @@ def test_release_uses_git_objects_excludes_untracked_private_decoy_and_is_determ
     assert result.returncode!=0
     assert b'Publication guard failed' in result.stderr
     assert not (tmp_path/'blocked/home-monitoring-v1.2.3.zip').exists()
+
+
+def test_collector_presence_reads_only_answering_neighbours(tmp_path):
+    from collector import neighbours
+    table = tmp_path / "arp"
+    table.write_text("IP address HW type Flags HW address Mask Device\n192.0.2.20 0x1 0x2 AA:BB:CC:00:00:01 * eth0\n192.0.2.21 0x1 0x0 00:00:00:00:00:00 * eth0\n")
+    assert neighbours(table) == {"aa:bb:cc:00:00:01"}

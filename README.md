@@ -32,6 +32,11 @@ These previews show the interface, not recognition accuracy.*
 - Shows snapshots and recognition results in a responsive, installable PWA.
 - Explores a day of activity by camera, recognition state, and time range, with
   capture coverage and alert snooze periods alongside the events.
+- Works as a person detector when cameras cannot resolve faces: face recognition
+  is a setting, and turning it off skips all face processing.
+- Sends person alerts always, on a schedule, or when you are away (by button or by
+  phones leaving the home network), plus alerts when a camera stops reporting.
+- Keeps up to five photos per event and leads with the clearest one.
 - Uses device invitations and revocable access, plus generic encrypted Web Push
   alerts for unidentified people, including when no face is visible. Payloads
   contain no images or names.

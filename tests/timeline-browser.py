@@ -89,13 +89,13 @@ def run():
                     for other in boxes[i+1:]:
                         assert box['y'] != other['y'] or box['x']+box['width'] <= other['x'] or other['x']+other['width'] <= box['x']
             assert not errors,errors
-            expect(phone.locator('#alert-mode')).to_have_text('Alerts active')
+            expect(phone.locator('#alert-mode')).to_have_text('Alerts on')
             assert phone.locator('#alert-controls').bounding_box()['height'] <= 84
             phone.locator('#snooze-alerts').click()
             expect(phone.get_by_role('dialog')).to_be_visible()
             phone.locator('#cancel-snooze').click()
             expect(phone.get_by_role('dialog')).not_to_be_visible()
-            expect(phone.locator('#alert-mode')).to_have_text('Alerts active')
+            expect(phone.locator('#alert-mode')).to_have_text('Alerts on')
             phone.locator('#snooze-alerts').click()
             phone.get_by_role('button',name='1 hour',exact=True).click()
             expect(phone.get_by_role('dialog')).not_to_be_visible()
@@ -105,7 +105,7 @@ def run():
             (ROOT / '.runtime/qa').mkdir(parents=True,exist_ok=True)
             phone.screenshot(path=str(ROOT / '.runtime/qa/compact-alerts-mobile.png'),full_page=True)
             phone.locator('#resume-alerts').click()
-            expect(phone.locator('#alert-mode')).to_have_text('Alerts active')
+            expect(phone.locator('#alert-mode')).to_have_text('Alerts on')
             expect(phone.locator('#snooze-alerts')).to_be_visible()
             touch.close()
             # A missing module must leave a visible recovery screen, not a blank PWA.

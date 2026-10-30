@@ -1,16 +1,45 @@
 """Durable, device-scoped Web Push. Payloads never contain faces or images."""
 import base64
+from datetime import datetime
 import json
 import os
 from pathlib import Path
 import time
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from pywebpush import WebPushException, webpush
 
 from .access import MAX_AGE
+
+ALERT_LIFETIME_SECONDS = 900
+OFFLINE_AFTER_SECONDS = 300
+PRESENCE_FRESH_SECONDS = 300
+ALERTING_STATES = {"person", "unknown", "unavailable"}
+
+
+def in_window(start, end, moment):
+    """Schedules may cross midnight; identical times mean the whole day."""
+    if start == end:
+        return True
+    return start <= moment < end if start < end else moment >= start or moment < end
+
+
+def alert_state(settings, now):
+    """Why person alerts are on or off right now. Snooze is applied separately."""
+    if settings["away_mode"]:
+        return {"armed": True, "reason": "away"}
+    if settings["auto_away"] and settings["presence_home"] is False and now - settings["presence_at"] < PRESENCE_FRESH_SECONDS:
+        return {"armed": True, "reason": "nobody_home"}
+    if settings["alert_mode"] == "always":
+        return {"armed": True, "reason": "always"}
+    if settings["alert_mode"] == "schedule":
+        moment = datetime.fromtimestamp(now, ZoneInfo(settings["alert_timezone"])).strftime("%H:%M")
+        armed = in_window(settings["alert_schedule_start"], settings["alert_schedule_end"], moment)
+        return {"armed": armed, "reason": "schedule" if armed else "outside_schedule"}
+    return {"armed": False, "reason": "off"}
 
 
 def unbase64(value):
@@ -66,6 +95,7 @@ class Push:
                     state TEXT NOT NULL DEFAULT 'pending', UNIQUE(device_id,event_id)
                 );
                 CREATE TABLE IF NOT EXISTS push_cooldown(camera_id TEXT PRIMARY KEY,last_queued REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS camera_outages(camera_id TEXT PRIMARY KEY,since REAL NOT NULL);
             """)
             if "sent_at" not in {row["name"] for row in store.rows("PRAGMA table_info(push_jobs)")}:
                 store.db.execute("ALTER TABLE push_jobs ADD COLUMN sent_at REAL")
@@ -89,28 +119,69 @@ class Push:
         return {"public_key": self.public_key, "subscribed": bool(rows), "last_sent": rows[0]["last_sent"] if rows else None, "last_error": rows[0]["last_error"] if rows else None}
 
     @staticmethod
-    def payload(test=False):
-        return {"title": "Home Monitor test" if test else "Unidentified person detected", "body": "Notifications are working. You can close Home Monitor and still receive alerts." if test else "A person could not be identified. Open Home Monitor to review.", "tag": "home-monitor-test" if test else "home-monitor-activity", "expires_at": time.time()+120}
+    def payload(test=False, state=None, event_id=None):
+        if test:
+            title, body = "Home Monitor test", "Notifications are working. You can close Home Monitor and still receive alerts."
+        elif state == "person":
+            title, body = "Person detected", "Someone was seen on your cameras. Open Home Monitor to review."
+        else:
+            title, body = "Unidentified person detected", "A person could not be identified. Open Home Monitor to review."
+        message = {"title": title, "body": body, "tag": "home-monitor-test" if test else "home-monitor-activity", "expires_at": time.time()+ALERT_LIFETIME_SECONDS}
+        return {**message, "event_id": event_id} if event_id else message
 
     def enqueue_event(self, camera_id, event_id):
         with self.store.lock:
             now = time.time()
             settings = self.store.settings()
-            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now:
+            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not alert_state(settings, now)["armed"]:
                 return
             event = self.store.rows("SELECT camera_id,state FROM events WHERE id=?", (event_id,))
-            if not event or event[0]["camera_id"] != camera_id or event[0]["state"] not in {"unknown", "unavailable"}:
+            if not event or event[0]["camera_id"] != camera_id or event[0]["state"] not in ALERTING_STATES:
                 return
-            devices = self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND d.created_at>?", (now-MAX_AGE,))
+            devices = self.devices(now)
             recent = self.store.rows("SELECT last_queued FROM push_cooldown WHERE camera_id=?", (camera_id,))
             if not devices or (recent and now-recent[0]["last_queued"] < settings["alert_cooldown_minutes"] * 60):
                 return
             inserted = False
             for device in devices:
-                cursor = self.store.execute("INSERT OR IGNORE INTO push_jobs(device_id,event_id,payload,created_at,next_try) VALUES(?,?,?,?,?)", (device["device_id"], event_id, json.dumps(self.payload()), now, now))
+                cursor = self.store.execute("INSERT OR IGNORE INTO push_jobs(device_id,event_id,payload,created_at,next_try) VALUES(?,?,?,?,?)", (device["device_id"], event_id, json.dumps(self.payload(state=event[0]["state"], event_id=event_id)), now, now))
                 inserted = inserted or bool(cursor.rowcount)
             if inserted:
                 self.store.execute("INSERT INTO push_cooldown VALUES(?,?) ON CONFLICT(camera_id) DO UPDATE SET last_queued=excluded.last_queued", (camera_id, now))
+
+    def devices(self, now):
+        return self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND d.created_at>?", (now-MAX_AGE,))
+
+    def notify_health(self, title, body, tag, now):
+        message = {"title": title, "body": body, "tag": tag, "expires_at": now+ALERT_LIFETIME_SECONDS}
+        for device in self.devices(now):
+            self.store.execute("INSERT INTO push_jobs(device_id,payload,created_at,next_try) VALUES(?,?,?,?)", (device["device_id"], json.dumps(message), now, now))
+
+    def check_cameras(self, now=None):
+        """Tell every device once when frames stop, and once when they return."""
+        now = time.time() if now is None else now
+        with self.store.lock:
+            settings = self.store.settings()
+            if not settings["monitoring_enabled"] or not settings["offline_alerts"]:
+                self.store.execute("DELETE FROM camera_outages")
+                return
+            cameras = self.store.rows("SELECT id,name,COALESCE(last_frame,last_seen) AS seen FROM cameras")
+            known = {row["camera_id"] for row in self.store.rows("SELECT camera_id FROM camera_outages")}
+            down = [camera for camera in cameras if camera["seen"] and now-camera["seen"] > OFFLINE_AFTER_SECONDS]
+            down_ids = {camera["id"] for camera in down}
+            fresh = [camera for camera in down if camera["id"] not in known]
+            minutes = OFFLINE_AFTER_SECONDS // 60
+            if fresh and len(down) == len(cameras) and len(cameras) > 1:
+                self.notify_health("Monitoring has stopped", f"No camera has sent a snapshot for {minutes} minutes. Check the collector and cameras.", "home-monitor-health", now)
+            else:
+                for camera in fresh:
+                    self.notify_health("Camera offline", f"{camera['name']} has not sent a snapshot for {minutes} minutes.", f"home-monitor-camera-{camera['id']}", now)
+            for camera in fresh:
+                self.store.execute("INSERT INTO camera_outages VALUES(?,?)", (camera["id"], camera["seen"]))
+            for camera in cameras:
+                if camera["id"] in known and camera["id"] not in down_ids:
+                    self.store.execute("DELETE FROM camera_outages WHERE camera_id=?", (camera["id"],))
+                    self.notify_health("Camera back online", f"{camera['name']} is sending snapshots again.", f"home-monitor-camera-{camera['id']}", now)
 
     def test(self, device_id):
         with self.store.lock:
@@ -124,7 +195,7 @@ class Push:
 
     def _send(self, subscription, payload):
         try:
-            response = webpush(subscription_info=subscription, data=json.dumps(payload), vapid_private_key=str(self.key_path), vapid_claims={"sub": self.subject}, ttl=120, timeout=6, headers={"Urgency": "high"})
+            response = webpush(subscription_info=subscription, data=json.dumps(payload), vapid_private_key=str(self.key_path), vapid_claims={"sub": self.subject}, ttl=ALERT_LIFETIME_SECONDS, timeout=6, headers={"Urgency": "high"})
             return response.status_code
         except WebPushException as error:
             return error.response.status_code if error.response is not None else None
@@ -135,7 +206,7 @@ class Push:
     def deliver_one(self):
         with self.store.lock:
             now = time.time()
-            self.store.execute("UPDATE push_jobs SET state='expired' WHERE state='pending' AND created_at<?", (now-120,))
+            self.store.execute("UPDATE push_jobs SET state='expired' WHERE state='pending' AND created_at<?", (now-ALERT_LIFETIME_SECONDS,))
             self.store.execute("DELETE FROM push_jobs WHERE event_id IS NULL AND created_at<?", (now-86400,))
             rows = self.store.rows("SELECT j.*,s.endpoint,s.p256dh,s.auth FROM push_jobs j JOIN push_subscriptions s ON s.device_id=j.device_id JOIN access_devices d ON d.id=j.device_id WHERE j.state='pending' AND j.next_try<=? AND d.revoked=0 AND d.created_at>? ORDER BY j.id LIMIT 1", (now, now-MAX_AGE))
             if not rows:
@@ -144,7 +215,7 @@ class Push:
             if job["event_id"]:
                 event = self.store.rows("SELECT state FROM events WHERE id=?", (job["event_id"],))
                 settings = self.store.settings()
-                if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not event or event[0]["state"] not in {"unknown", "unavailable"}:
+                if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not event or event[0]["state"] not in ALERTING_STATES:
                     self.store.execute("UPDATE push_jobs SET state='cancelled' WHERE id=?", (job["id"],))
                     return True
             # Claim before network I/O; a restart retries instead of losing the job.

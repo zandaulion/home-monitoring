@@ -49,7 +49,8 @@ self.addEventListener('push', event => {
   // Tailscale connection is needed merely to display a notification.
   event.waitUntil(self.registration.showNotification(payload.title || 'Home Monitor', {
     body: payload.body || 'New activity is ready to review.',
-    tag: payload.tag || 'home-monitor-activity'
+    tag: payload.tag || 'home-monitor-activity',
+    data: {eventId: payload.event_id || null}
   }));
 });
 
@@ -57,11 +58,12 @@ self.addEventListener('push', event => {
 self.addEventListener('notificationclick', event => {
   event.notification.close();
   event.waitUntil((async () => {
+    const eventId = event.notification.data?.eventId;
     const windows = await self.clients.matchAll({type:'window', includeUncontrolled:true});
     const existing = windows.find(client => new URL(client.url).origin === self.location.origin);
     if (existing) {
-      existing.postMessage({type:'open-activity'});
+      existing.postMessage({type:'open-activity', eventId});
       await existing.focus();
-    } else await self.clients.openWindow('/#events');
+    } else await self.clients.openWindow(eventId ? `/#event=${eventId}` : '/#events');
   })());
 });

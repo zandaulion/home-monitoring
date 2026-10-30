@@ -7,6 +7,9 @@ import threading
 import time
 import uuid
 
+MAX_PHOTOS = 5
+PHOTO_SPACING_SECONDS = 2
+
 
 def write_image(path, data):
     """Readers see a complete frame even while the next snapshot arrives."""
@@ -29,19 +32,22 @@ class Store:
         self.db.executescript("""
             PRAGMA journal_mode=WAL;
             PRAGMA foreign_keys=ON;
-            CREATE TABLE IF NOT EXISTS cameras(id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen REAL, error TEXT, inference_ms INTEGER, width INTEGER, height INTEGER);
+            CREATE TABLE IF NOT EXISTS cameras(id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen REAL, error TEXT, inference_ms INTEGER, width INTEGER, height INTEGER, last_frame REAL);
             CREATE TABLE IF NOT EXISTS people(id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE, embedding TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]');
             CREATE INDEX IF NOT EXISTS events_recent ON events(last_seen DESC);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS camera_periods(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), state TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS camera_periods_recent ON camera_periods(camera_id,end DESC);
             CREATE TABLE IF NOT EXISTS alert_snoozes(id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL);
         """)
+        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'")):
+            if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         for camera in cameras:
             self.db.execute("INSERT OR IGNORE INTO cameras(id,name) VALUES(?,?)", (camera["id"], camera["name"]))
-        for key, value in {"retention_days": 7, "storage_limit_mb": 2048, "recognition_threshold": 0.50, "monitoring_enabled": True, "alert_cooldown_minutes": 5, "alerts_snoozed_until": 0}.items():
+        for key, value in {"retention_days": 7, "storage_limit_mb": 2048, "recognition_threshold": 0.50, "monitoring_enabled": True, "alert_cooldown_minutes": 5, "alerts_snoozed_until": 0, "recognition_enabled": True, "alert_mode": "always", "alert_schedule_start": "22:00", "alert_schedule_end": "06:00", "alert_timezone": "UTC", "away_mode": False, "auto_away": False, "offline_alerts": True, "presence_home": None, "presence_at": 0}.items():
             self.db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)", (key, json.dumps(value)))
         until = self.settings()["alerts_snoozed_until"]
         now = time.time()
@@ -72,6 +78,7 @@ class Store:
         names = {p["id"]: p["name"] for p in self.people()}
         for row in rows:
             row["faces"] = json.loads(row["faces"])
+            row["photos"] = sorted(json.loads(row["photos"]), key=lambda photo: photo["at"])
             for face in row["faces"]:
                 face.pop("embedding", None)
                 face["name"] = names.get(face.get("person_id"))
@@ -119,7 +126,17 @@ class Store:
         rows = self.rows("SELECT * FROM events WHERE " + " AND ".join(clauses) + " ORDER BY last_seen DESC LIMIT ?", params)
         return self.describe_events(rows)
 
-    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None):
+    @staticmethod
+    def photo_slot(photos, now, score):
+        """Keep a spread of frames; once full, only a better frame replaces one."""
+        if photos and now - max(photo["at"] for photo in photos) < PHOTO_SPACING_SECONDS:
+            return None
+        if len(photos) < MAX_PHOTOS:
+            return min(set(range(MAX_PHOTOS)) - {photo["n"] for photo in photos})
+        weakest = min(photos, key=lambda photo: photo["score"])
+        return weakest["n"] if score >= weakest["score"] else None
+
+    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None, score=0.0):
         now = now or time.time()
         signature = lambda items: sorted((f.get("person_id") or ("unknown" if f["usable"] else "unavailable")) for f in items)
         with self.lock:
@@ -127,18 +144,35 @@ class Store:
             merge = bool(recent and not recent[0]["corrected"] and now - recent[0]["last_seen"] < 45 and recent[0]["state"] == state and signature(json.loads(recent[0]["faces"])) == signature(faces))
             event_id = recent[0]["id"] if merge else uuid.uuid4().hex
             folder = self.root / "events" / event_id
-            if merge and now - recent[0]["image_at"] < 15:
+            photos = json.loads(recent[0]["photos"]) if merge else []
+            slot = self.photo_slot(photos, now, score)
+            if slot is None:
                 self.execute("UPDATE events SET last_seen=?,person_count=? WHERE id=?", (now, people_count, event_id))
                 return event_id
             folder.mkdir(exist_ok=True, mode=0o700)
-            write_image(folder / "snapshot.jpg", image)
-            for i, crop in enumerate(face_images):
-                write_image(folder / f"face-{i}.jpg", crop)
-            if merge:
-                self.execute("UPDATE events SET last_seen=?,person_count=?,faces=?,image_at=? WHERE id=?", (now, people_count, json.dumps(faces), now, event_id))
+            write_image(folder / f"photo-{slot}.jpg", image)
+            photos = [photo for photo in photos if photo["n"] != slot] + [{"n": slot, "at": now, "score": score}]
+            best = not merge or score >= max(photo["score"] for photo in photos)
+            if best:
+                # Face crops always describe the frame shown as the main photo.
+                for i, crop in enumerate(face_images):
+                    write_image(folder / f"face-{i}.jpg", crop)
+            if not merge:
+                self.execute("INSERT INTO events(id,camera_id,first_seen,last_seen,state,person_count,faces,corrected,image_at,photos) VALUES(?,?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now, json.dumps(photos)))
+            elif best:
+                self.execute("UPDATE events SET last_seen=?,person_count=?,faces=?,image_at=?,photos=? WHERE id=?", (now, people_count, json.dumps(faces), now, json.dumps(photos), event_id))
             else:
-                self.execute("INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now))
+                self.execute("UPDATE events SET last_seen=?,person_count=?,photos=? WHERE id=?", (now, people_count, json.dumps(photos), event_id))
             return event_id
+
+    def event_image(self, event_id):
+        """The best photo; events from before photo selection keep one snapshot."""
+        rows = self.rows("SELECT photos FROM events WHERE id=?", (event_id,))
+        photos = json.loads(rows[0]["photos"]) if rows else []
+        folder = self.root / "events" / event_id
+        if not photos:
+            return folder / "snapshot.jpg"
+        return folder / f"photo-{max(photos, key=lambda photo: (photo['score'], photo['at']))['n']}.jpg"
 
     def delete_event(self, event_id):
         self.execute("DELETE FROM events WHERE id=?", (event_id,))

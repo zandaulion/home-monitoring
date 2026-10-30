@@ -1,4 +1,5 @@
 import base64
+from datetime import datetime, timezone
 import json
 import time
 
@@ -7,7 +8,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 import pytest
 
 from home_monitor.access import Access
-from home_monitor.push import Push, validate_subscription
+from home_monitor.push import Push, alert_state, in_window, validate_subscription
 from home_monitor.store import Store
 
 
@@ -92,7 +93,7 @@ def test_transient_failure_retries_without_duplicate_sent_jobs(push_setup):
 def test_old_alerts_expire_instead_of_being_delivered(push_setup):
     store, accounts, push, device_id, deliveries = push_setup
     push.test(device_id)
-    store.execute("UPDATE push_jobs SET created_at=?", (time.time()-121,))
+    store.execute("UPDATE push_jobs SET created_at=?", (time.time()-901,))
     assert not push.deliver_one()
     assert not deliveries
     assert store.rows("SELECT state FROM push_jobs")[0]["state"] == "expired"
@@ -208,3 +209,96 @@ def test_recognised_people_never_queue_an_alert(push_setup):
     eid=store.record_event('camera-test','known',1,[],b'synthetic',[])
     push.enqueue_event('camera-test',eid)
     assert not store.rows('SELECT * FROM push_jobs')
+
+
+def set_values(store, **values):
+    for key, value in values.items():
+        store.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(value), key))
+
+
+@pytest.mark.parametrize("start,end,moment,expected", [
+    ("22:00", "06:00", "23:30", True), ("22:00", "06:00", "05:59", True), ("22:00", "06:00", "06:00", False),
+    ("22:00", "06:00", "12:00", False), ("09:00", "17:00", "12:00", True), ("09:00", "17:00", "18:00", False), ("08:00", "08:00", "03:00", True),
+])
+def test_schedule_window_crosses_midnight(start, end, moment, expected):
+    assert in_window(start, end, moment) is expected
+
+
+def test_alert_state_precedence_and_time_zone(push_setup):
+    store, *_ = push_setup
+    noon_utc = datetime(2026, 7, 1, 12, 0, tzinfo=timezone.utc).timestamp()
+    set_values(store, alert_mode="schedule", alert_schedule_start="15:30", alert_schedule_end="17:00", alert_timezone="Etc/GMT-3")
+    assert alert_state(store.settings(), noon_utc) == {"armed": False, "reason": "outside_schedule"}
+    assert alert_state(store.settings(), noon_utc+3600) == {"armed": True, "reason": "schedule"}
+    set_values(store, alert_mode="off")
+    assert not alert_state(store.settings(), noon_utc)["armed"]
+    set_values(store, auto_away=True, presence_home=False, presence_at=noon_utc-60)
+    assert alert_state(store.settings(), noon_utc)["reason"] == "nobody_home"
+    # A stale report means the collector stopped, not that the house is empty.
+    assert not alert_state(store.settings(), noon_utc+600)["armed"]
+    set_values(store, presence_home=True)
+    assert not alert_state(store.settings(), noon_utc)["armed"]
+    set_values(store, away_mode=True)
+    assert alert_state(store.settings(), noon_utc)["reason"] == "away"
+
+
+def test_disarmed_alerts_record_activity_without_a_job(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    set_values(store, alert_mode="off")
+    push.enqueue_event("camera-test", store.record_event("camera-test", "person", 1, [], b"synthetic", []))
+    assert not store.rows("SELECT id FROM push_jobs")
+    assert store.events()
+
+
+def test_person_alert_links_to_its_event_without_private_detail(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    eid = store.record_event("camera-test", "person", 1, [], b"synthetic", [])
+    push.enqueue_event("camera-test", eid)
+    push.deliver_one()
+    message = deliveries[0][1]
+    assert message["title"] == "Person detected" and message["event_id"] == eid
+    assert "camera-test" not in json.dumps(message)
+    assert message["expires_at"] > time.time()+800
+
+
+def offline(store, seconds):
+    store.execute("UPDATE cameras SET last_seen=?,last_frame=?", (time.time()-seconds, time.time()-seconds))
+
+
+def test_offline_camera_alerts_once_then_once_on_recovery(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    offline(store, 60)
+    push.check_cameras()
+    assert not store.rows("SELECT id FROM push_jobs")
+    offline(store, 400)
+    push.check_cameras()
+    push.check_cameras()
+    assert len(store.rows("SELECT id FROM push_jobs")) == 1
+    push.deliver_one()
+    assert deliveries[-1][1]["title"] == "Camera offline"
+    offline(store, 5)
+    push.check_cameras()
+    push.check_cameras()
+    push.deliver_one()
+    assert deliveries[-1][1]["title"] == "Camera back online"
+    assert len(deliveries) == 2
+
+
+def test_offline_alerts_ignore_snooze_but_respect_pause_and_setting(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    offline(store, 400)
+    set_values(store, offline_alerts=False)
+    push.check_cameras()
+    set_values(store, offline_alerts=True, monitoring_enabled=False)
+    push.check_cameras()
+    assert not store.rows("SELECT id FROM push_jobs")
+    set_values(store, monitoring_enabled=True, alerts_snoozed_until=time.time()+3600)
+    push.check_cameras()
+    push.deliver_one()
+    assert len(deliveries) == 1
+
+
+def test_camera_that_never_reported_is_not_offline(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    push.check_cameras()
+    assert not store.rows("SELECT id FROM push_jobs")

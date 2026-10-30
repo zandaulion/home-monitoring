@@ -8,7 +8,9 @@ let status, events = [], page = '', busy = false, toastTimer, modalTimer;
 let authorized = false, pendingWrites = 0, installPrompt = null;
 let pushState = null, notificationBusy = false;
 const modal = $('#modal');
-const labels = {known:'Recognised', unknown:'Unrecognised face', unavailable:'Face unavailable'};
+const labels = {person:'Person', known:'Recognised', unknown:'Unrecognised face', unavailable:'Face unavailable'};
+const personOnly = () => status ? !status.settings.recognition_enabled : false;
+const shownState = event => personOnly() ? 'person' : event.state;
 
 async function api(path, options = {}) {
   const write = options.method && !['GET','HEAD'].includes(options.method);
@@ -99,12 +101,13 @@ modal.addEventListener('close', () => clearInterval(modalTimer));
 modal.addEventListener('click', event => { if (event.target === modal) { const r = modal.getBoundingClientRect(); if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) closeModal(); } });
 
 function eventTitle(event) {
+  if (personOnly()) return event.person_count > 1 ? 'People detected' : 'Person detected';
   const names = [...new Set(event.faces.map(face => face.name).filter(Boolean))];
   if (names.length) return names.join(', ') + (event.state === 'unknown' ? ' + unrecognised face' : event.state === 'unavailable' ? ' · another identity unavailable' : ' seen');
   return event.state === 'unknown' ? 'An unrecognised face was seen' : 'A person was detected';
 }
 function renderEvents(target, list, overview = false) {
-  target.innerHTML = list.length ? list.map(event => `<button class="event-row" data-event="${event.id}"><img class="event-thumb" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot" loading="lazy"><div class="event-main"><div class="event-title">${esc(eventTitle(event))}</div><div class="event-meta">${esc(cameraName(event.camera_id))} · ${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}${event.corrected ? ' · Reviewed' : ''}</div></div><span class="pill ${event.state}">${labels[event.state]}</span><time class="event-time" datetime="${new Date(event.last_seen*1000).toISOString()}" title="${esc(fullDate(event.last_seen))}">${relative(event.last_seen)}</time></button>`).join('') : empty(overview ? 'Home, in the quiet moments.' : 'No activity here yet.', overview ? 'When a person is detected, their snapshot and recognition result will appear here.' : 'New person detections will appear here. Try another filter if you are looking for an older event.');
+  target.innerHTML = list.length ? list.map(event => `<button class="event-row" data-event="${event.id}"><img class="event-thumb" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot" loading="lazy"><div class="event-main"><div class="event-title">${esc(eventTitle(event))}</div><div class="event-meta">${esc(cameraName(event.camera_id))} · ${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}${event.corrected ? ' · Reviewed' : ''}</div></div><span class="pill ${shownState(event)}">${labels[shownState(event)]}</span><time class="event-time" datetime="${new Date(event.last_seen*1000).toISOString()}" title="${esc(fullDate(event.last_seen))}">${relative(event.last_seen)}</time></button>`).join('') : empty(overview ? 'Home, in the quiet moments.' : 'No activity here yet.', overview ? 'When a person is detected, their snapshot and recognition result will appear here.' : 'New person detections will appear here. Try another filter if you are looking for an older event.');
   $$('[data-event]', target).forEach(button => button.addEventListener('click', () => showEvent(list.find(event => event.id === button.dataset.event))));
 }
 
@@ -114,12 +117,17 @@ function renderOverview() {
   const stats = [
     ['Cameras online', `${status.cameras.filter(c => c.online).length} <small>/ ${status.cameras.length}</small>`, 'Connected through the collector', '▣'],
     ['Activity events', total, 'In the last 24 hours', '◷'],
-    ['Recognised events', counts.known || 0, 'Matched to your face library', '♙'],
-    ['Unrecognised events', counts.unknown || 0, 'Clear faces without a match', '◎']
+    ...(personOnly() ? [
+      ['Alerts', status.alerts.armed ? 'On' : 'Off', alertDetail(), '◎'],
+      ['Last activity', events[0] ? relative(events[0].last_seen) : 'None', events[0] ? cameraName(events[0].camera_id) : 'Nothing recorded yet', '♙']
+    ] : [
+      ['Recognised events', counts.known || 0, 'Matched to your face library', '♙'],
+      ['Unrecognised events', counts.unknown || 0, 'Clear faces without a match', '◎']
+    ])
   ];
   $('#stats').innerHTML = stats.map(([name, value, note, icon]) => `<div class="stat"><div class="stat-top"><span>${name}</span><span class="stat-icon">${icon}</span></div><div class="stat-number">${value}</div><div class="stat-note">${note}</div></div>`).join('');
   $('#camera-total').textContent = status.cameras.length;
-  $('#enrollment-banner').hidden = status.recognition_ready;
+  $('#enrollment-banner').hidden = status.recognition_ready || personOnly();
   $('#paused-banner').hidden = status.settings.monitoring_enabled;
   $('#sampling-label').textContent = status.settings.monitoring_enabled ? 'Motion-aware snapshots' : 'Paused';
   const existing = $$('.camera-card', $('#camera-grid'));
@@ -194,6 +202,8 @@ async function refresh() {
   busy = true;
   try {
     [status, events] = await Promise.all([api('/status'), api('/events?limit=6')]);
+    document.body.classList.toggle('person-only', personOnly());
+    if (personOnly()) $('#state-filter').value = '';
     renderAlertMode();
     $('#connection').textContent = '● Private & connected';
     $('#error-banner').hidden = true;
@@ -211,6 +221,8 @@ async function refresh() {
 
 async function navigate() {
   if (!authorized) return;
+  const linked = location.hash.match(/^#event=([a-f0-9]{32})$/)?.[1];
+  if (linked) { history.replaceState(null, '', '/#events'); openLinkedEvent(linked); }
   page = ['overview','events','people','settings'].includes(location.hash.slice(1)) ? location.hash.slice(1) : 'overview';
   $$('.page').forEach(section => section.hidden = section.id !== 'page-' + page);
   $$('nav a').forEach(link => link.classList.toggle('active', link.dataset.page === page));
@@ -235,11 +247,35 @@ function showCamera(cameraId) {
   modalTimer = setInterval(() => { const image = $('#camera-modal-image'); if (image && document.visibilityState === 'visible') image.src = `/api/cameras/${camera.id}/image?v=${Date.now()}`; }, 5000);
 }
 
-function showEvent(event) {
-  const options = '<option value="">Choose a person…</option>' + status.people.map(person => `<option value="${person.id}">${esc(person.name)}</option>`).join('');
-  openModal('A moment at home', `<img class="modal-image" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot"><div class="modal-details"><span class="pill ${event.state}">${labels[event.state]}</span><span>${esc(cameraName(event.camera_id))}</span><span>${esc(fullDate(event.first_seen))}</span><span>${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}</span></div>${event.faces.length ? '<h3>Faces in this moment</h3>' : '<p class="modal-note">A person was detected, but no face was clear enough to identify. This does not mean the person is unfamiliar.</p>'}${event.faces.map((face, index) => `<div class="face-row"><img src="/api/events/${event.id}/faces/${index}" alt="Detected face"><div><strong>${esc(face.name || (face.usable ? 'Unrecognised face' : 'Face not clear enough'))}</strong><p>${face.name ? 'Verify the name before using this as a training sample.' : face.usable ? 'Assign a person to improve future recognition.' : 'Use a clearer portrait to enrol this person.'}</p>${status.people.length ? `<div class="face-actions"><select aria-label="Identify face ${index+1}" data-face-select="${index}">${options}</select><button class="button secondary" data-assign="${index}">Correct label</button>${face.usable ? `<button class="button" data-train="${index}">Label & learn</button>` : ''}</div>` : '<a class="text-link" href="#people" id="event-add-person">Add a person to your library ↗</a>'}</div></div>`).join('')}<p class="modal-note">“Label & learn” adds this face to the selected person’s library. Only use clear, correctly identified faces.</p><div class="modal-actions"><button class="button danger" id="delete-event">Delete this event</button><button class="button secondary" id="done-event">Done</button></div>`);
-  $('#event-add-person')?.addEventListener('click', closeModal);
+async function openLinkedEvent(id) {
+  try {
+    const [event] = await api('/timeline/events?ids=' + id);
+    if (event) showEvent(event); else toast('This event is no longer available.');
+  } catch (error) { toast(error.message); }
+}
+
+function photoStrip(event) {
+  if (event.photos.length < 2) return '';
+  return `<div class="photo-strip">${event.photos.map(photo => `<button type="button" class="photo-choice" data-photo="/api/events/${event.id}/photos/${photo.n}?v=${photo.at}" aria-label="Show the photo from ${esc(new Date(photo.at*1000).toLocaleTimeString())}"><img src="/api/events/${event.id}/photos/${photo.n}?v=${photo.at}" alt="" loading="lazy"></button>`).join('')}</div>`;
+}
+
+function showPersonEvent(event) {
+  openModal('A moment at home', `<img class="modal-image" id="event-photo" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot">${photoStrip(event)}<div class="modal-details"><span class="pill person">${labels.person}</span><span>${esc(cameraName(event.camera_id))}</span><span>${esc(fullDate(event.first_seen))}</span><span>${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}</span></div><div class="modal-actions"><button class="button danger" id="delete-event">Delete this event</button><button class="button secondary" id="done-event">Done</button></div>`);
+  wireEvent(event);
+}
+
+function wireEvent(event) {
+  $$('[data-photo]').forEach(button => button.addEventListener('click', () => { $('#event-photo').src = button.dataset.photo; }));
   $('#done-event').addEventListener('click', closeModal);
+  $('#delete-event').addEventListener('click', async () => { if (!confirm('Delete this event and its images?')) return; try { await api(`/events/${event.id}`, {method:'DELETE'}); closeModal(); await refresh(); toast('Event deleted.'); } catch (error) { toast(error.message); } });
+}
+
+function showEvent(event) {
+  if (personOnly()) { showPersonEvent(event); return; }
+  const options = '<option value="">Choose a person…</option>' + status.people.map(person => `<option value="${person.id}">${esc(person.name)}</option>`).join('');
+  openModal('A moment at home', `<img class="modal-image" id="event-photo" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot">${photoStrip(event)}<div class="modal-details"><span class="pill ${event.state}">${labels[event.state]}</span><span>${esc(cameraName(event.camera_id))}</span><span>${esc(fullDate(event.first_seen))}</span><span>${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}</span></div>${event.faces.length ? '<h3>Faces in this moment</h3>' : '<p class="modal-note">A person was detected, but no face was clear enough to identify. This does not mean the person is unfamiliar.</p>'}${event.faces.map((face, index) => `<div class="face-row"><img src="/api/events/${event.id}/faces/${index}" alt="Detected face"><div><strong>${esc(face.name || (face.usable ? 'Unrecognised face' : 'Face not clear enough'))}</strong><p>${face.name ? 'Verify the name before using this as a training sample.' : face.usable ? 'Assign a person to improve future recognition.' : 'Use a clearer portrait to enrol this person.'}</p>${status.people.length ? `<div class="face-actions"><select aria-label="Identify face ${index+1}" data-face-select="${index}">${options}</select><button class="button secondary" data-assign="${index}">Correct label</button>${face.usable ? `<button class="button" data-train="${index}">Label & learn</button>` : ''}</div>` : '<a class="text-link" href="#people" id="event-add-person">Add a person to your library ↗</a>'}</div></div>`).join('')}<p class="modal-note">“Label & learn” adds this face to the selected person’s library. Only use clear, correctly identified faces.</p><div class="modal-actions"><button class="button danger" id="delete-event">Delete this event</button><button class="button secondary" id="done-event">Done</button></div>`);
+  $('#event-add-person')?.addEventListener('click', closeModal);
+  wireEvent(event);
   const assign = async (index, train, button) => {
     const personId = $(`[data-face-select="${index}"]`).value;
     if (!personId) { toast('Choose a person first.'); return; }
@@ -248,7 +284,6 @@ function showEvent(event) {
   };
   $$('[data-assign]').forEach(button => button.addEventListener('click', () => assign(button.dataset.assign, false, button)));
   $$('[data-train]').forEach(button => button.addEventListener('click', () => assign(button.dataset.train, true, button)));
-  $('#delete-event').addEventListener('click', async () => { if (!confirm('Delete this event and its images?')) return; try { await api(`/events/${event.id}`, {method:'DELETE'}); closeModal(); await refresh(); toast('Event deleted.'); } catch (error) { toast(error.message); } });
 }
 
 function addPerson() {
@@ -313,17 +348,24 @@ $('#test-notifications').addEventListener('click', async () => {
   catch (error) { toast(error.message); }
   finally { button.disabled = false; }
 });
+function alertDetail() {
+  const {reason} = status.alerts, {alert_schedule_start:start, alert_schedule_end:end} = status.settings;
+  return {away:'Away mode is on', nobody_home:'Nobody is home', always:'Always on', schedule:`Until ${end}`, outside_schedule:`From ${start}`, off:'Only when away'}[reason];
+}
 function renderAlertMode() {
   const until = status.settings.alerts_snoozed_until;
   const snoozed = until > Date.now()/1000;
   const monitoring = status.settings.monitoring_enabled;
-  $('#alert-mode').textContent = !monitoring ? 'Monitoring paused' : snoozed ? 'Alerts snoozed' : 'Alerts active';
+  $('#alert-mode').textContent = !monitoring ? 'Monitoring paused' : snoozed ? 'Alerts snoozed' : status.alerts.armed ? 'Alerts on' : 'Alerts off';
   const endTime = new Date(until*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-  $('#alert-detail').textContent = !monitoring ? 'Resume monitoring in Settings' : snoozed ? `Until ${endTime} · all devices` : 'People not identified';
+  $('#alert-detail').textContent = !monitoring ? 'Resume monitoring in Settings' : snoozed ? `Until ${endTime} · all devices` : alertDetail();
   $('#alert-controls').classList.toggle('is-snoozed', snoozed);
   $('#alert-controls').classList.toggle('is-paused', !monitoring);
   $('#resume-alerts').hidden = !snoozed;
-  $('#snooze-alerts').hidden = snoozed || !monitoring;
+  $('#snooze-alerts').hidden = snoozed || !monitoring || !status.alerts.armed;
+  const away = $('#away-toggle');
+  away.hidden = !monitoring; away.textContent = status.settings.away_mode ? 'I’m home' : 'Away';
+  away.setAttribute('aria-pressed', String(status.settings.away_mode));
 }
 async function snoozeAlerts(minutes) {
   const buttons = [$('#snooze-alerts'), $('#resume-alerts'), ...$$('[data-snooze-minutes]', modal)];
@@ -344,6 +386,13 @@ $('#snooze-alerts').addEventListener('click', () => {
   $('#cancel-snooze').addEventListener('click', closeModal);
 });
 $('#resume-alerts').addEventListener('click', () => snoozeAlerts(0));
+$('#away-toggle').addEventListener('click', async event => {
+  const button = event.currentTarget, enabled = !status.settings.away_mode;
+  button.disabled = true;
+  try { await api(`/alerts/away?enabled=${enabled}`, {method:'POST'}); await refresh(); toast(enabled ? 'Away mode on. Alerts are on for all devices.' : 'Welcome home. Away mode is off.'); }
+  catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
 $('#refresh-button').addEventListener('click', refresh);
 $('#discard-settings').addEventListener('click', () => { delete $('#settings-form').dataset.dirty; renderSettings(); toast('Unsaved settings discarded.'); });
 $('#camera-filter').addEventListener('change', () => loadEvents().catch(error => toast(error.message)));
@@ -353,7 +402,7 @@ $('#refresh-activity').addEventListener('click', () => loadEvents(true).catch(er
 $('#settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, button = $('button[type=submit]', form); button.disabled = true;
   try {
-    const values = {monitoring_enabled:form.elements.monitoring_enabled.checked,retention_days:Number(form.elements.retention_days.value),storage_limit_mb:Number(form.elements.storage_limit_mb.value),recognition_threshold:Number(form.elements.recognition_threshold.value),alert_cooldown_minutes:Number(form.elements.alert_cooldown_minutes.value)};
+    const values = {monitoring_enabled:form.elements.monitoring_enabled.checked,retention_days:Number(form.elements.retention_days.value),storage_limit_mb:Number(form.elements.storage_limit_mb.value),recognition_threshold:Number(form.elements.recognition_threshold.value),alert_cooldown_minutes:Number(form.elements.alert_cooldown_minutes.value),recognition_enabled:form.elements.recognition_enabled.checked,alert_mode:form.elements.alert_mode.value,alert_schedule_start:form.elements.alert_schedule_start.value,alert_schedule_end:form.elements.alert_schedule_end.value,alert_timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,auto_away:form.elements.auto_away.checked,offline_alerts:form.elements.offline_alerts.checked};
     if (values.retention_days < status.settings.retention_days || values.storage_limit_mb < status.settings.storage_limit_mb) { if (!confirm('Apply the smaller retention limit? Older events may be permanently deleted.')) return; }
     await api('/settings', json('PUT', values)); delete form.dataset.dirty; await refresh(); renderSettings(); toast('Settings saved.');
   } catch (error) { toast(error.message); } finally { button.disabled = false; }
@@ -362,7 +411,7 @@ window.addEventListener('hashchange', () => { if (captureInvitation()) showActiv
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
 window.addEventListener('online', () => { if (authorized) refresh(); else boot(); });
 window.addEventListener('offline', () => { if (authorized) { $('#connection').textContent = 'Offline'; $('#error-banner').textContent = 'You’re offline. Reconnect to load current cameras and activity.'; $('#error-banner').hidden = false; } });
-navigator.serviceWorker?.addEventListener('message', event => { if (event.data?.type === 'open-activity' && authorized) location.hash = 'events'; });
+navigator.serviceWorker?.addEventListener('message', event => { if (event.data?.type === 'open-activity' && authorized) { location.hash = 'events'; if (event.data.eventId) openLinkedEvent(event.data.eventId); } });
 $('#today').textContent = new Date().toLocaleDateString([], {weekday:'long',day:'numeric',month:'long'}).toUpperCase();
 boot();
 installUpdates({appName:'Home Monitor',toast,isBusy:() => pendingWrites > 0 || modal.open || $$('form[data-dirty="true"]').some(form => !form.closest('dialog'))});

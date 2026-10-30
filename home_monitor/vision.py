@@ -23,6 +23,20 @@ def choose_identity(embedding, samples, threshold=0.50, margin=0.08):
     return (winner if score >= threshold and separated else None), round(score, 4)
 
 
+def photo_score(frame, people, faces=()):
+    """Prefer a large, sharp view of the person; a visible face outranks that."""
+    boxes = [face["box"] for face in faces] or [person["box"] for person in people]
+    if not boxes:
+        return 0.0
+    h, w = frame.shape[:2]
+    x, y, bw, bh = max(boxes, key=lambda box: box[2] * box[3])
+    crop = frame[max(0, y):y + bh, max(0, x):x + bw]
+    if not crop.size:
+        return 0.0
+    sharpness = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
+    return round(bw * bh / (w * h) * float(np.log1p(sharpness)) + (10 if faces else 0), 4)
+
+
 class Vision:
     def __init__(self, model_dir: Path):
         cv2.setNumThreads(1)
@@ -123,11 +137,11 @@ class Vision:
             results.append({"box": [int(x1), int(y1), int(x2 - x1), int(y2 - y1)], "usable": usable, "embedding": feature, "crop": self.jpeg(crop)})
         return results
 
-    def analyze(self, frame, samples, threshold=0.50):
+    def analyze(self, frame, samples, threshold=0.50, find_faces=True):
         start = time.monotonic()
         with self.lock:
             people = self._people(frame)
-            faces = self._faces(frame)
+            faces = self._faces(frame) if find_faces else []
             for face in faces:
                 face["person_id"], face["similarity"] = choose_identity(face["embedding"], samples, threshold) if face["usable"] else (None, None)
         return {"people": people, "faces": faces, "elapsed_ms": round((time.monotonic() - start) * 1000)}

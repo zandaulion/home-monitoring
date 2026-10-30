@@ -5,10 +5,12 @@ snapshots are held in RAM; the cameras retain their own continuous recordings.
 """
 import argparse
 import concurrent.futures
+import ipaddress
 import io
 import json
 import logging
 import signal
+import socket
 import threading
 import time
 import urllib.error
@@ -24,6 +26,50 @@ def motion_fraction(previous, current):
     diff = ImageChops.difference(previous, current)
     histogram = diff.histogram()
     return sum(histogram[13:]) / (current.width * current.height)
+
+
+def neighbours(path="/proc/net/arp"):
+    """MAC addresses that currently answer on the local network."""
+    with open(path) as file:
+        rows = [line.split() for line in file.readlines()[1:]]
+    return {row[3].lower() for row in rows if len(row) >= 4 and row[2] == "0x2"}
+
+
+def report_presence(config):
+    """Report whether a family phone is on the home network.
+
+    Phones doze, so absence only counts after a long quiet period. Addresses
+    stay in this private config; the server receives a single yes or no.
+    """
+    presence = config.get("presence")
+    if not presence:
+        return
+    macs = {mac.lower() for mac in presence["macs"]}
+    hosts = [str(host) for host in ipaddress.ip_network(presence["subnet"]).hosts()]
+    grace = presence.get("grace_seconds", 900)
+    interval = presence.get("interval_seconds", 30)
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    url = config["server_url"].rstrip("/") + "/api/ingest/presence"
+    seen_at = time.monotonic()
+    while not STOP.is_set():
+        try:
+            # Any packet makes the kernel ask who holds the address.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                for host in hosts:
+                    try:
+                        probe.sendto(b"", (host, 9))
+                    except OSError:
+                        pass
+            STOP.wait(5)
+            if macs & neighbours():
+                seen_at = time.monotonic()
+            body = json.dumps({"home": time.monotonic() - seen_at < grace}).encode()
+            request = urllib.request.Request(url, data=body, headers={"Authorization": "Bearer " + config["collector_token"], "Content-Type": "application/json"})
+            with opener.open(request, timeout=12):
+                pass
+        except Exception:
+            LOG.warning("Presence report temporarily unavailable")
+        STOP.wait(interval)
 
 
 def run_camera(camera, config):
@@ -89,7 +135,9 @@ def run_camera(camera, config):
                 send("/heartbeat", json.dumps({"error": error}).encode(), "application/json")
             except Exception:
                 pass
-        interval = config.get("interval_seconds", 2) if not failures else min(30, 2 ** min(failures, 5))
+        # Sample faster during movement so a quick pass yields more than one frame.
+        steady = config.get("active_interval_seconds", 1) if started < active_until else config.get("interval_seconds", 2)
+        interval = steady if not failures else min(30, 2 ** min(failures, 5))
         STOP.wait(max(0.1, interval - (time.monotonic() - started)))
 
 
@@ -105,8 +153,9 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: STOP.set())
     signal.signal(signal.SIGINT, lambda *_: STOP.set())
     LOG.info("Starting %s cameras; continuous video stays on camera cards", len(config["cameras"]))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(config["cameras"])) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(config["cameras"]) + 1) as pool:
         futures = [pool.submit(run_camera, camera, config) for camera in config["cameras"]]
+        futures.append(pool.submit(report_presence, config))
         for future in futures:
             future.result()
 

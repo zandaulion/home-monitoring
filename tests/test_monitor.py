@@ -22,8 +22,8 @@ class SyntheticVision:
     decode = staticmethod(Vision.decode)
     jpeg = staticmethod(Vision.jpeg)
 
-    def analyze(self, frame, samples, threshold):
-        return {"people": self.people, "faces": self.faces, "elapsed_ms": 12}
+    def analyze(self, frame, samples, threshold, find_faces=True):
+        return {"people": self.people, "faces": self.faces if find_faces else [], "elapsed_ms": 12}
 
     def enroll(self, data):
         self.decode(data)
@@ -74,6 +74,77 @@ def test_person_without_face_is_not_unknown(setup, jpeg):
     response = client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
     assert response.json()["state"] == "unavailable"
     assert store.events()[0]["faces"] == []
+
+
+def test_person_only_mode_skips_faces_and_labels_people(setup, jpeg):
+    client, store, engine = setup
+    settings = store.settings()
+    settings["recognition_enabled"] = False
+    assert client.put("/api/settings", json=settings, headers=OWNER).status_code == 200
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.9}]
+    engine.faces = [{"box": [1, 1, 50, 50], "usable": True, "embedding": np.array([1.0, 0.0]), "crop": jpeg, "person_id": None, "similarity": None}]
+    response = client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    assert response.json()["state"] == "person"
+    event = store.events()[0]
+    assert event["faces"] == [] and event["state"] == "person"
+    assert client.get("/api/timeline", params={"start": 1, "end": 2, "state": "person"}, headers=OWNER).status_code == 200
+
+
+def test_invalid_alert_settings_are_rejected(setup):
+    client, store, engine = setup
+    settings = store.settings()
+    assert client.put("/api/settings", json={**settings, "alert_mode": "sometimes"}, headers=OWNER).status_code == 422
+    assert client.put("/api/settings", json={**settings, "alert_schedule_start": "25:00"}, headers=OWNER).status_code == 422
+    assert client.put("/api/settings", json={**settings, "alert_timezone": "Mars/Base"}, headers=OWNER).status_code == 422
+    assert client.put("/api/settings", json={**settings, "alert_timezone": "Etc/GMT-3", "alert_mode": "schedule"}, headers=OWNER).status_code == 200
+    assert store.settings()["alert_mode"] == "schedule"
+
+
+def test_away_button_arms_alerts_and_presence_is_collector_only(setup):
+    client, store, engine = setup
+    store.execute("UPDATE settings SET value='\"off\"' WHERE key='alert_mode'")
+    assert client.get("/api/status", headers=OWNER).json()["alerts"] == {"armed": False, "reason": "off"}
+    assert client.post("/api/alerts/away?enabled=true", headers=OWNER).status_code == 200
+    assert client.get("/api/status", headers=OWNER).json()["alerts"]["reason"] == "away"
+    assert client.post("/api/ingest/presence", json={"home": False}, headers=OWNER).status_code == 401
+    assert client.post("/api/ingest/presence", json={"home": "no"}, headers=COLLECTOR).status_code == 422
+    assert client.post("/api/ingest/presence", json={"home": False}, headers=COLLECTOR).status_code == 200
+    assert store.settings()["presence_home"] is False
+
+
+def test_event_keeps_a_spread_of_photos_and_the_best_as_snapshot(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-1", "name": "Example"}])
+    start = time.time()
+    scores = [1, 5, 2, 3, 4, 9, 0.5]
+    for index, score in enumerate(scores):
+        eid = store.record_event("camera-1", "person", 1, [], f"frame-{index}".encode(), [], now=start+index*3, score=score)
+    event = store.events()[0]
+    assert len(event["photos"]) == 5
+    assert store.event_image(eid).read_bytes() == b"frame-5"
+    assert not (tmp_path / "events" / eid / "snapshot.jpg").exists()
+    assert sorted(photo["score"] for photo in event["photos"]) == [2, 3, 4, 5, 9]
+    assert event["image_at"] == start+15
+    assert event["last_seen"] == start+18
+    store.db.close()
+
+
+def test_frames_too_close_together_extend_the_event_without_a_photo(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-1", "name": "Example"}])
+    start = time.time()
+    store.record_event("camera-1", "person", 1, [], b"one", [], now=start, score=1)
+    store.record_event("camera-1", "person", 1, [], b"two", [], now=start+1, score=9)
+    event = store.events()[0]
+    assert len(event["photos"]) == 1 and event["last_seen"] == start+1
+    store.db.close()
+
+
+def test_event_photos_require_device_access(setup, jpeg):
+    client, store, engine = setup
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.9}]
+    eid = client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["event_id"]
+    assert client.get(f"/api/events/{eid}/photos/0", headers=COLLECTOR).status_code == 401
+    assert client.get(f"/api/events/{eid}/photos/0", headers=OWNER).status_code == 200
+    assert client.get(f"/api/events/{eid}/photos/5", headers=OWNER).status_code == 404
 
 
 def test_sample_enrollment_and_person_deletion(setup, jpeg):

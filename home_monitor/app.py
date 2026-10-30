@@ -10,19 +10,21 @@ import re
 import shutil
 import threading
 import time
+from typing import Literal
 import uuid
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import cv2
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
-from .store import Store, write_image
-from .vision import Vision
+from .store import MAX_PHOTOS, Store, write_image
+from .vision import Vision, photo_score
 from .access import Access, COOKIE, MAX_AGE, TTL_DAYS
-from .push import Push
+from .push import ALERTING_STATES, Push, alert_state
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).parent / "static"
@@ -43,6 +45,22 @@ class SettingsInput(BaseModel):
     recognition_threshold: float = Field(ge=0.45, le=0.85)
     monitoring_enabled: bool
     alert_cooldown_minutes: int = Field(default=5, ge=1, le=60)
+    recognition_enabled: bool = True
+    alert_mode: Literal["off", "schedule", "always"] = "always"
+    alert_schedule_start: str = Field(default="22:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    alert_schedule_end: str = Field(default="06:00", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    alert_timezone: str = Field(default="UTC", max_length=64)
+    auto_away: bool = False
+    offline_alerts: bool = True
+
+    @field_validator("alert_timezone")
+    @classmethod
+    def known_timezone(cls, value):
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError, OSError) as error:
+            raise ValueError("Unknown time zone") from error
+        return value
 
 
 class Assignment(BaseModel):
@@ -73,6 +91,10 @@ def create_app(config=None, vision=None, push_sender=None):
                 storage_bytes = await run_in_threadpool(store.cleanup)
             except Exception:
                 LOG.exception("Retention cleanup failed")
+            try:
+                await run_in_threadpool(push.check_cameras)
+            except Exception:
+                LOG.warning("Camera health check temporarily unavailable")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -351,7 +373,7 @@ def create_app(config=None, vision=None, push_sender=None):
         midnight = now - 86400
         counts = store.rows("SELECT state,count(*) AS n FROM events WHERE first_seen>? GROUP BY state", (midnight,))
         disk = shutil.disk_usage(store.root)
-        return {"cameras": cameras, "settings": settings, "people": store.people(), "last_24h": {r["state"]: r["n"] for r in counts}, "storage_bytes": storage_bytes, "disk_free_bytes": disk.free, "server_time": now, "recognition_ready": bool(store.samples()), "recognition_model": "SFace", "sampling_seconds": config.get("sampling_seconds", 2), "private_access": "Tailscale", "recording": "Camera SD cards"}
+        return {"cameras": cameras, "settings": settings, "people": store.people(), "last_24h": {r["state"]: r["n"] for r in counts}, "storage_bytes": storage_bytes, "disk_free_bytes": disk.free, "server_time": now, "recognition_ready": bool(store.samples()), "alerts": alert_state(settings, now), "recognition_model": "SFace", "sampling_seconds": config.get("sampling_seconds", 2), "private_access": "Tailscale", "recording": "Camera SD cards"}
 
     @app.get("/api/events")
     def events(camera: str | None = None, state: str | None = None, before: float | None = None, limit: int = 60):
@@ -363,7 +385,7 @@ def create_app(config=None, vision=None, push_sender=None):
             raise HTTPException(422, "Choose a period of up to one day")
         if camera and camera not in camera_ids:
             raise HTTPException(422, "Unknown camera")
-        if state and state not in {"known", "unknown", "unavailable"}:
+        if state and state not in {"person", "known", "unknown", "unavailable"}:
             raise HTTPException(422, "Unknown recognition filter")
         clauses, params = ["last_seen>=?", "first_seen<?"], [start, end]
         if camera:
@@ -407,7 +429,13 @@ def create_app(config=None, vision=None, push_sender=None):
 
     @app.get("/api/events/{event_id}/image")
     def event_image(event_id: str):
-        return file_response(store.root / "events" / valid_id(event_id) / "snapshot.jpg")
+        return file_response(store.event_image(valid_id(event_id)))
+
+    @app.get("/api/events/{event_id}/photos/{index}")
+    def event_photo(event_id: str, index: int):
+        if not 0 <= index < MAX_PHOTOS:
+            raise HTTPException(404)
+        return file_response(store.root / "events" / valid_id(event_id) / f"photo-{index}.jpg")
 
     @app.get("/api/events/{event_id}/faces/{index}")
     def face_image(event_id: str, index: int):
@@ -537,6 +565,11 @@ def create_app(config=None, vision=None, push_sender=None):
                 store.execute("UPDATE push_jobs SET state='cancelled' WHERE state='pending' AND event_id IS NOT NULL")
         return {"alerts_snoozed_until": until}
 
+    @app.post("/api/alerts/away")
+    def set_away(enabled: bool = Query()):
+        store.execute("UPDATE settings SET value=? WHERE key='away_mode'", (json.dumps(enabled),))
+        return {"away_mode": enabled}
+
     @app.put("/api/settings")
     async def settings(payload: SettingsInput):
         nonlocal storage_bytes
@@ -562,10 +595,11 @@ def create_app(config=None, vision=None, push_sender=None):
                 store.record_coverage(camera_id, "paused", now)
                 return {"ok": True, "paused": True}
             frame = engine.decode(data)
-            result = engine.analyze(frame, store.samples(), settings["recognition_threshold"])
+            recognition = settings["recognition_enabled"]
+            result = engine.analyze(frame, store.samples() if recognition else [], settings["recognition_threshold"], find_faces=recognition)
             write_image(store.root / "latest" / f"{camera_id}.jpg", engine.jpeg(frame))
             h, w = frame.shape[:2]
-            store.execute("UPDATE cameras SET last_seen=?,error=NULL,inference_ms=?,width=?,height=? WHERE id=?", (now, result["elapsed_ms"], w, h, camera_id))
+            store.execute("UPDATE cameras SET last_seen=?,last_frame=?,error=NULL,inference_ms=?,width=?,height=? WHERE id=?", (now, now, result["elapsed_ms"], w, h, camera_id))
             store.record_coverage(camera_id, "online", now)
             face_rows, crops = [], []
             for face in result["faces"]:
@@ -593,6 +627,8 @@ def create_app(config=None, vision=None, push_sender=None):
             # Do not imply everybody is identified when extra people lack a face.
             if state == "known" and person_count > len(usable):
                 state = "unavailable"
+            if not recognition:
+                state = "person"
             annotated = frame.copy()
             for person in result["people"]:
                 x, y, bw, bh = person["box"]
@@ -600,16 +636,30 @@ def create_app(config=None, vision=None, push_sender=None):
             for face in face_rows:
                 x, y, bw, bh = face["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (120, 210, 150) if face["person_id"] else (80, 180, 235), 2)
-            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now)
+            score = photo_score(frame, result["people"], face_rows)
+            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score)
             previous_at, count = unidentified_observations.get(camera_id, (0, 0))
-            if state in {"unknown", "unavailable"}:
+            if state in ALERTING_STATES:
                 count = count+1 if now - previous_at < 20 else 1
                 unidentified_observations[camera_id] = (now, count)
-                if count >= 2:
+                # Without faces there is nothing to wait for, and a fast intruder may appear once.
+                if count >= (2 if recognition else 1):
                     push.enqueue_event(camera_id, event_id)
             else:
                 unidentified_observations.pop(camera_id, None)
             return {"ok": True, "people": person_count, "event_id": event_id, "state": state}
+
+    @app.post("/api/ingest/presence")
+    async def presence(request: Request):
+        try:
+            home = json.loads(await image_bytes(request))["home"]
+        except (ValueError, TypeError, KeyError):
+            raise HTTPException(422, "Invalid presence report")
+        if not isinstance(home, bool):
+            raise HTTPException(422, "Invalid presence report")
+        for key, value in (("presence_home", home), ("presence_at", time.time())):
+            store.execute("UPDATE settings SET value=? WHERE key=?", (json.dumps(value), key))
+        return {"ok": True}
 
     @app.post("/api/ingest/{camera_id}/frame")
     async def ingest(camera_id: str, request: Request):
