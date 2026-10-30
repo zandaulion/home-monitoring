@@ -12,6 +12,8 @@ requirement to add every feature or document to every repository.
 | Diagnostics | Placeholder, invalid-permission and missing-asset cases return actionable errors without printing secrets. Connectivity and identity checks remain separate from static config checks. |
 | Data recovery | Backup scope covers related database/media/key material, states how consistency is obtained, and explains what restoring does and does not preserve. |
 | CI | Tests run without live accounts or model downloads unless explicitly part of the test; permissions and execution time are bounded. |
+| Dependency maintenance | The default branch contains valid updater configuration for actual dependency manifests and CI actions; referenced constraints/lockfiles are covered. Check repository alert/security-update settings separately. Updates open reviewable PRs under the existing merge policy. |
+| Repository metadata | The public description explains the product; a focused topic set matches its capabilities and stack. No private hostnames, accounts or infrastructure identifiers appear. |
 | Distribution | Archive contains only the reviewed revision; a private untracked decoy cannot enter it; same inputs generate the same package; checksum verifies after extraction/download. |
 | Publication | Exact outgoing metadata and content have been reviewed; remote commit/tree and release hashes match; no hidden working-directory additions were swept in. |
 

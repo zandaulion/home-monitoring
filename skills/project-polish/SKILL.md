@@ -44,6 +44,17 @@ choices and continue without a new approval gate for every reversible edit.
   Preserve an existing deployment; test setup in temporary storage.
 - Put meaningful existing tests and relevant preview/package checks into CI with
   minimal permissions, pinned actions and no production credentials or accounts.
+- Configure dependency maintenance for the actual package ecosystems and CI
+  actions, using Dependabot or the project's existing equivalent. For Dependabot,
+  use weekly checks as a starting point, keep related manifests and constraints
+  consistent, and group compatible updates to limit PR noise. Verify the config
+  is on the default branch. Repository vulnerability alerts and automated security
+  fixes are separate settings: verify or enable them within the authorized scope.
+  Preserve the project's review policy; adding update PRs does not authorize
+  automatic merging or production deployment.
+- Set a concise repository description and a focused set of accurate topic tags
+  when repository metadata is in scope. Describe the product and real stack,
+  preserve useful existing topics, and exclude private deployment information.
 - Add project-appropriate contribution guidance, private vulnerability reporting,
   license and upstream notices. Inspect existing/vendored terms; do not blindly
   impose a license on third-party code, models or data.

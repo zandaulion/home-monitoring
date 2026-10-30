@@ -6,6 +6,11 @@ role-specific requirement files install only the packages that role needs. When
 updating dependencies, resolve in a fresh environment and rerun tests and browser
 checks before refreshing constraints.
 
+Dependabot checks Python dependencies (including the referenced constraints)
+and GitHub Actions every Monday, grouping version updates by ecosystem. Review
+Python requirement and constraint changes together and run the existing checks
+before merging. Dependency pull requests are not merged automatically.
+
 Run `python -m pytest -q`, `node tests/push-worker.mjs`, and
 `node tests/activity-timeline.mjs`. Tests use synthetic images and temporary data;
 they do not require camera access or model downloads. FastAPI tests need local
