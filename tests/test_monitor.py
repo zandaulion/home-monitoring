@@ -432,3 +432,16 @@ def test_timeline_alert_marker_hides_subscription_data(setup):
     assert result['notifications'] == [{'event_id':eid,'at':now}]
     assert 'endpoint' not in json.dumps(result)
     assert 'synthetic-key' not in json.dumps(result)
+
+
+def test_no_visible_face_queues_after_repeated_person_observations(setup, jpeg, monkeypatch):
+    client, store, engine = setup
+    queued=[]
+    monkeypatch.setattr(client.app.state.push,'enqueue_event',lambda camera,event:queued.append(event))
+    engine.people=[{'box':[10,10,50,100],'score':0.9}]
+    assert client.post('/api/ingest/camera-1/frame',content=jpeg,headers=COLLECTOR).json()['state']=='unavailable'
+    assert queued==[]
+    time.sleep(.85)
+    response=client.post('/api/ingest/camera-1/frame',content=jpeg,headers=COLLECTOR)
+    assert response.status_code==200
+    assert queued==[response.json()['event_id']]

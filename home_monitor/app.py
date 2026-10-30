@@ -62,7 +62,7 @@ def create_app(config=None, vision=None, push_sender=None):
     ingest_lock = threading.Lock()
     latest_processed = {}
     votes = {}
-    unknown_observations = {}
+    unidentified_observations = {}
     storage_bytes = store.cleanup()
 
     async def cleanup_loop():
@@ -586,6 +586,7 @@ def create_app(config=None, vision=None, push_sender=None):
                     del votes[key]
             person_count = max(len(result["people"]), len(face_rows))
             if not person_count:
+                unidentified_observations.pop(camera_id, None)
                 return {"ok": True, "people": 0}
             usable = [f for f in face_rows if f["usable"]]
             state = "unknown" if any(not f["person_id"] and not f["pending"] for f in usable) else "unavailable" if any(f["pending"] for f in usable) else "known" if usable else "unavailable"
@@ -600,14 +601,14 @@ def create_app(config=None, vision=None, push_sender=None):
                 x, y, bw, bh = face["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (120, 210, 150) if face["person_id"] else (80, 180, 235), 2)
             event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now)
-            previous_id, count = unknown_observations.get(camera_id, (None, 0))
-            if state == "unknown":
-                count = count+1 if previous_id == event_id else 1
-                unknown_observations[camera_id] = (event_id, count)
+            previous_at, count = unidentified_observations.get(camera_id, (0, 0))
+            if state in {"unknown", "unavailable"}:
+                count = count+1 if now - previous_at < 20 else 1
+                unidentified_observations[camera_id] = (now, count)
                 if count >= 2:
                     push.enqueue_event(camera_id, event_id)
             else:
-                unknown_observations.pop(camera_id, None)
+                unidentified_observations.pop(camera_id, None)
             return {"ok": True, "people": person_count, "event_id": event_id, "state": state}
 
     @app.post("/api/ingest/{camera_id}/frame")

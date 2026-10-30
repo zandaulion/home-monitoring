@@ -190,3 +190,21 @@ def test_sent_alert_records_relay_acceptance_time(push_setup):
     before = time.time()
     assert push.deliver_one()
     assert before <= store.rows('SELECT sent_at FROM push_jobs')[0]['sent_at'] <= time.time()
+
+
+@pytest.mark.parametrize('state', ['unknown', 'unavailable'])
+def test_unidentified_people_alert_without_enrolled_faces(push_setup, state):
+    store, _, push, _, deliveries = push_setup
+    assert not store.samples()
+    eid = store.record_event('camera-test', state, 1, [], b'synthetic', [])
+    push.enqueue_event('camera-test',eid)
+    assert push.deliver_one()
+    assert deliveries[0][1]['title'] == 'Unidentified person detected'
+    assert 'face' not in deliveries[0][1]['body']
+
+
+def test_recognised_people_never_queue_an_alert(push_setup):
+    store, _, push, _, _ = push_setup
+    eid=store.record_event('camera-test','known',1,[],b'synthetic',[])
+    push.enqueue_event('camera-test',eid)
+    assert not store.rows('SELECT * FROM push_jobs')

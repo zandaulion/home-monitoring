@@ -316,20 +316,33 @@ $('#test-notifications').addEventListener('click', async () => {
 function renderAlertMode() {
   const until = status.settings.alerts_snoozed_until;
   const snoozed = until > Date.now()/1000;
-  $('#alert-mode').textContent = snoozed ? `Alerts snoozed until ${fullDate(until)}` : status.settings.monitoring_enabled ? 'Alerts active · unrecognised faces only' : 'Monitoring paused';
+  const monitoring = status.settings.monitoring_enabled;
+  $('#alert-mode').textContent = !monitoring ? 'Monitoring paused' : snoozed ? 'Alerts snoozed' : 'Alerts active';
+  const endTime = new Date(until*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  $('#alert-detail').textContent = !monitoring ? 'Resume monitoring in Settings' : snoozed ? `Until ${endTime} · all devices` : 'People not identified';
+  $('#alert-controls').classList.toggle('is-snoozed', snoozed);
+  $('#alert-controls').classList.toggle('is-paused', !monitoring);
   $('#resume-alerts').hidden = !snoozed;
+  $('#snooze-alerts').hidden = snoozed || !monitoring;
 }
 async function snoozeAlerts(minutes) {
-  const buttons = [$('#snooze-alerts'), $('#resume-alerts')];
+  const buttons = [$('#snooze-alerts'), $('#resume-alerts'), ...$$('[data-snooze-minutes]', modal)];
   buttons.forEach(button => button.disabled = true);
   try {
-    await api('/alerts/snooze?minutes=' + minutes, {method:'POST'});
+    const result = await api('/alerts/snooze?minutes=' + minutes, {method:'POST'});
+    status.settings.alerts_snoozed_until = result.alerts_snoozed_until;
+    renderAlertMode();
+    if (minutes) closeModal();
     await refresh();
     toast(minutes ? 'Alerts snoozed on all devices. Activity recording continues.' : 'Alerts resumed on all devices.');
   } catch (error) { toast(error.message); }
   finally { buttons.forEach(button => button.disabled = false); }
 }
-$('#snooze-alerts').addEventListener('click', () => snoozeAlerts(Number($('#snooze-duration').value)));
+$('#snooze-alerts').addEventListener('click', () => {
+  openModal('Snooze alerts', `<p class="modal-note">Pause alerts on all devices. Activity recording continues, and alerts resume automatically.</p><div class="snooze-options">${[[30,'30 minutes'],[60,'1 hour'],[120,'2 hours'],[240,'4 hours'],[480,'8 hours']].map(([minutes,label]) => `<button type="button" class="button secondary" data-snooze-minutes="${minutes}">${label}</button>`).join('')}</div><div class="modal-actions"><button type="button" class="button secondary" id="cancel-snooze">Cancel</button></div>`);
+  $$('[data-snooze-minutes]', modal).forEach(button => button.addEventListener('click', () => snoozeAlerts(Number(button.dataset.snoozeMinutes))));
+  $('#cancel-snooze').addEventListener('click', closeModal);
+});
 $('#resume-alerts').addEventListener('click', () => snoozeAlerts(0));
 $('#refresh-button').addEventListener('click', refresh);
 $('#discard-settings').addEventListener('click', () => { delete $('#settings-form').dataset.dirty; renderSettings(); toast('Unsaved settings discarded.'); });

@@ -90,13 +90,16 @@ class Push:
 
     @staticmethod
     def payload(test=False):
-        return {"title": "Home Monitor test" if test else "Unrecognised face detected", "body": "Notifications are working. You can close Home Monitor and still receive alerts." if test else "A clear unrecognised face was detected. Open Home Monitor to review.", "tag": "home-monitor-test" if test else "home-monitor-activity", "expires_at": time.time()+120}
+        return {"title": "Home Monitor test" if test else "Unidentified person detected", "body": "Notifications are working. You can close Home Monitor and still receive alerts." if test else "A person could not be identified. Open Home Monitor to review.", "tag": "home-monitor-test" if test else "home-monitor-activity", "expires_at": time.time()+120}
 
     def enqueue_event(self, camera_id, event_id):
         with self.store.lock:
             now = time.time()
             settings = self.store.settings()
-            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not self.store.samples():
+            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now:
+                return
+            event = self.store.rows("SELECT camera_id,state FROM events WHERE id=?", (event_id,))
+            if not event or event[0]["camera_id"] != camera_id or event[0]["state"] not in {"unknown", "unavailable"}:
                 return
             devices = self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND d.created_at>?", (now-MAX_AGE,))
             recent = self.store.rows("SELECT last_queued FROM push_cooldown WHERE camera_id=?", (camera_id,))
@@ -141,7 +144,7 @@ class Push:
             if job["event_id"]:
                 event = self.store.rows("SELECT state FROM events WHERE id=?", (job["event_id"],))
                 settings = self.store.settings()
-                if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not event or event[0]["state"] != "unknown":
+                if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not event or event[0]["state"] not in {"unknown", "unavailable"}:
                     self.store.execute("UPDATE push_jobs SET state='cancelled' WHERE id=?", (job["id"],))
                     return True
             # Claim before network I/O; a restart retries instead of losing the job.

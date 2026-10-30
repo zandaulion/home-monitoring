@@ -195,8 +195,11 @@ Subscription endpoints and their keys are private and never enter API responses,
 source control, the PWA cache, or application logs. Only recognised browser push
 service hosts on HTTPS port 443 are accepted as delivery endpoints.
 
-Unrecognised-face alerts require at least one enrolled person and two observations
-of the event. They are limited to one per camera per cooldown interval (five minutes by
+Unidentified-person alerts include unrecognised faces, missing or unclear faces,
+and groups where not everyone is identified. They require two person observations
+on the same camera less than 20 seconds apart, with no intervening empty or fully
+recognised frame. An enrolled face library is not required; fully recognised
+activity does not alert. They are limited to one per camera per cooldown interval (five minutes by
 default, configurable from 1–60 minutes in Settings) and one per event per device.
 The alert banner can snooze alerts on all devices for 30 minutes to eight hours,
 or resume them early. Snooze expires automatically and cancels queued activity

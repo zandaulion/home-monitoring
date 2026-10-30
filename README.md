@@ -33,7 +33,8 @@ These previews show the interface, not recognition accuracy.*
 - Explores a day of activity by camera, recognition state, and time range, with
   capture coverage and alert snooze periods alongside the events.
 - Uses device invitations and revocable access, plus generic encrypted Web Push
-  alerts that contain no images or names.
+  alerts for unidentified people, including when no face is visible. Payloads
+  contain no images or names.
 - Bounds event retention by age and storage size; enrolled samples are managed
   separately. Private images and API responses stay out of the PWA's offline cache.
 
