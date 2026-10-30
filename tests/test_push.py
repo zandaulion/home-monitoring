@@ -181,3 +181,12 @@ def test_configurable_cooldown_survives_restart(push_setup):
     store.execute('UPDATE push_cooldown SET last_queued=?', (time.time()-901,))
     restored.enqueue_event('camera-test', second)
     assert len(store.rows('SELECT * FROM push_jobs')) == 2
+
+
+def test_sent_alert_records_relay_acceptance_time(push_setup):
+    store, _, push, _, _ = push_setup
+    eid = event(store)
+    push.enqueue_event('camera-test',eid)
+    before = time.time()
+    assert push.deliver_one()
+    assert before <= store.rows('SELECT sent_at FROM push_jobs')[0]['sent_at'] <= time.time()

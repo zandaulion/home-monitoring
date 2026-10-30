@@ -10,6 +10,10 @@ to reuse the code. Configure those privately on the new machines.
 Install Python 3.12, venv support, Tailscale, and (for public access) Caddy and
 cloudflared. Clone this repository to a directory owned by the service user.
 The examples below assume `/srv/home-monitoring`; substitute your checkout path.
+`manage.py init` generates random server tokens and private config/service files
+without overwriting existing config. Template values still require local editing.
+For an existing deployment, keep its private config and run `doctor` with
+`--config /path/to/its/config.json`; do not rerun `init`.
 
 ```sh
 cd /srv/home-monitoring
@@ -18,8 +22,7 @@ python3.12 -m venv .venv
 umask 077
 mkdir -p .runtime
 chmod 700 .runtime
-cp deploy/server-config.example.json .runtime/config.json
-chmod 600 .runtime/config.json
+.venv/bin/python scripts/manage.py init server
 .venv/bin/python scripts/download_models.py
 ```
 
@@ -38,12 +41,14 @@ to exactly the HTTPS origins used by your dashboard and optional console.
 For private-only use, remove `public_origin`, set `public_base_url` to the private
 HTTPS origin, and omit public DNS, Caddy's public listener, and the tunnel.
 
-Install the user service, replacing `/srv/home-monitoring` in the installed copy
-if necessary:
+Run `.venv/bin/python scripts/manage.py doctor server` after editing the config.
+The check verifies private permissions, placeholders, model hashes, and origin
+consistency without printing secret values. Then install the generated user
+service, which already contains your absolute checkout path:
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp deploy/home-monitor.service.example ~/.config/systemd/user/home-monitor.service
+cp .runtime/home-monitor.service ~/.config/systemd/user/home-monitor.service
 systemctl --user daemon-reload
 systemctl --user enable --now home-monitor.service
 ```
@@ -69,8 +74,7 @@ python3 -m venv .venv
 umask 077
 mkdir -p .runtime
 chmod 700 .runtime
-cp deploy/collector-config.example.json .runtime/collector-config.json
-chmod 600 .runtime/collector-config.json
+.venv/bin/python scripts/manage.py init collector
 ```
 
 Edit that private file: set the server's private Tailscale HTTPS URL, the shared
@@ -81,12 +85,14 @@ on camera storage; this collector sends selected snapshots from memory.
 
 ```sh
 mkdir -p ~/.config/systemd/user
-cp deploy/home-monitor-collector.service.example ~/.config/systemd/user/home-monitor-collector.service
+cp .runtime/home-monitor-collector.service ~/.config/systemd/user/home-monitor-collector.service
 systemctl --user daemon-reload
 systemctl --user enable --now home-monitor-collector.service
 ```
 
-Replace the checkout paths in the installed service first. As on the server,
+Run `.venv/bin/python scripts/manage.py doctor collector` after editing the
+private file. It validates structure and permissions, not live camera or server
+connectivity. The generated service already uses your checkout path. As on the server,
 enable user lingering if available. Where it is unavailable, use `crontab -e`
 to append these lines, substituting the checkout path and preserving other jobs:
 

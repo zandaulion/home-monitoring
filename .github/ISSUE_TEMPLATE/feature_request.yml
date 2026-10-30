@@ -1,0 +1,14 @@
+name: Feature request
+description: Describe a workflow that could work better.
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: Describe the outcome using synthetic examples and no personal records.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Suggested behavior and tradeoffs

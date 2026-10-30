@@ -1,7 +1,7 @@
 // Adapted from the local pwa-kit reference worker. Only the empty shell is
 // persisted: authenticated APIs, images and invitation codes are network-only.
 const CACHE_NAME = 'home-monitor-__BUILD_VERSION__';
-const SHELL = ['/', '/assets/app.js', '/assets/style.css', '/pwa-update.js',
+const SHELL = ['/', '/assets/app.js', '/assets/timeline.js', '/assets/style.css', '/pwa-update.js',
   '/manifest.webmanifest', '/icons/icon.svg', '/icons/icon-192.png',
   '/icons/icon-512.png', '/icons/icon-maskable.png', '/icons/apple-touch-icon.png'];
 const STATIC_PATHS = new Set(SHELL);

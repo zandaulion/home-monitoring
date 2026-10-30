@@ -1,9 +1,10 @@
 import { installUpdates } from '/pwa-update.js';
+import { createTimeline } from '/assets/timeline.js';
 'use strict';
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-let status, events = [], shownEvents = [], page = '', busy = false, toastTimer, modalTimer;
+let status, events = [], page = '', busy = false, toastTimer, modalTimer;
 let authorized = false, pendingWrites = 0, installPrompt = null;
 let pushState = null, notificationBusy = false;
 const modal = $('#modal');
@@ -43,7 +44,8 @@ function captureInvitation() {
 }
 
 function showActivation(message = '') {
-  authorized = false; status = null; events = []; shownEvents = [];
+  authorized = false; status = null; events = [];
+  activityTimeline.reset();
   closeModal(); $('#dashboard').hidden = true; $('#activation').hidden = false;
   for (const id of ['camera-grid','recent-events','all-events','people-grid','camera-settings']) $('#'+id).replaceChildren();
   $('#activation-description').textContent = message || 'Activate this device with an invitation from your administrator to view your home.';
@@ -100,36 +102,6 @@ function eventTitle(event) {
   if (names.length) return names.join(', ') + (event.state === 'unknown' ? ' + unrecognised face' : event.state === 'unavailable' ? ' · another identity unavailable' : ' seen');
   return event.state === 'unknown' ? 'An unrecognised face was seen' : 'A person was detected';
 }
-// Group presentation only: recognition results and original snapshots stay separate.
-function groupActivity(list) {
-  const groups = [], latest = new Map();
-  for (const event of [...list].sort((a, b) => b.last_seen - a.last_seen)) {
-    let group = latest.get(event.camera_id);
-    if (!group || group.first_seen - event.last_seen > 600) {
-      group = {camera_id:event.camera_id, first_seen:event.first_seen, last_seen:event.last_seen, events:[]};
-      groups.push(group); latest.set(event.camera_id, group);
-    }
-    group.first_seen = Math.min(group.first_seen, event.first_seen);
-    group.events.push(event);
-  }
-  return groups;
-}
-function renderTimeline(target, list) {
-  const opened = new Set($$('details[open]', target).map(item => item.dataset.group));
-  if (!list.length) { renderEvents(target, list); return; }
-  target.innerHTML = groupActivity(list).map(group => {
-    const key = group.events[0].id;
-    const unknown = group.events.filter(event => event.state === 'unknown').length;
-    const start = fullDate(group.first_seen), end = new Date(group.last_seen*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
-    return `<details class="activity-period" data-group="${key}" ${group.events.some(event => opened.has(event.id)) ? 'open' : ''}><summary><span><strong>${esc(cameraName(group.camera_id))}</strong><span class="event-meta">${esc(start)} – ${esc(end)}</span></span><span>${group.events.length} ${group.events.length === 1 ? 'event' : 'events'}${unknown ? ` · ${unknown} with unrecognised faces` : ''}</span></summary><div class="period-events"></div></details>`;
-  }).join('');
-  const groups = groupActivity(list);
-  $$('.activity-period', target).forEach((details, index) => {
-    const fill = () => { if (details.open && !details.dataset.loaded) { renderEvents($('.period-events', details), groups[index].events); details.dataset.loaded = 'true'; } };
-    details.addEventListener('toggle', fill); fill();
-  });
-}
-
 function renderEvents(target, list, overview = false) {
   target.innerHTML = list.length ? list.map(event => `<button class="event-row" data-event="${event.id}"><img class="event-thumb" src="/api/events/${event.id}/image?v=${event.image_at}" alt="Event snapshot" loading="lazy"><div class="event-main"><div class="event-title">${esc(eventTitle(event))}</div><div class="event-meta">${esc(cameraName(event.camera_id))} · ${event.person_count} ${event.person_count === 1 ? 'person' : 'people'}${event.corrected ? ' · Reviewed' : ''}</div></div><span class="pill ${event.state}">${labels[event.state]}</span><time class="event-time" datetime="${new Date(event.last_seen*1000).toISOString()}" title="${esc(fullDate(event.last_seen))}">${relative(event.last_seen)}</time></button>`).join('') : empty(overview ? 'Home, in the quiet moments.' : 'No activity here yet.', overview ? 'When a person is detected, their snapshot and recognition result will appear here.' : 'New person detections will appear here. Try another filter if you are looking for an older event.');
   $$('[data-event]', target).forEach(button => button.addEventListener('click', () => showEvent(list.find(event => event.id === button.dataset.event))));
@@ -213,16 +185,8 @@ function publicKeyBytes(value) {
   return Uint8Array.from(raw, character => character.charCodeAt(0));
 }
 
-async function loadEvents(append = false) {
-  const params = new URLSearchParams();
-  if ($('#camera-filter').value) params.set('camera', $('#camera-filter').value);
-  if ($('#state-filter').value) params.set('state', $('#state-filter').value);
-  if (append && shownEvents.length) params.set('before', shownEvents.at(-1).last_seen);
-  const list = await api('/events?' + params);
-  shownEvents = append ? [...shownEvents, ...list] : list;
-  renderTimeline($('#all-events'), shownEvents);
-  $('#load-more').hidden = list.length < 60;
-}
+const activityTimeline = createTimeline({api, renderEvents, cameraName, esc, fullDate, toast, getStatus:() => status});
+async function loadEvents(force = false) { return activityTimeline.load(force); }
 
 async function refresh() {
   if (busy || !authorized) return;
@@ -235,7 +199,7 @@ async function refresh() {
     renderOverview();
     $('#people-count').textContent = status.people.length;
     if (page === 'people') renderPeople();
-    if (page === 'events' && shownEvents.length <= 60) await loadEvents();
+    if (page === 'events') await loadEvents();
   } catch (error) {
     if (error.status === 401) return;
     $('#connection').textContent = 'Connection interrupted';
@@ -370,8 +334,8 @@ $('#refresh-button').addEventListener('click', refresh);
 $('#discard-settings').addEventListener('click', () => { delete $('#settings-form').dataset.dirty; renderSettings(); toast('Unsaved settings discarded.'); });
 $('#camera-filter').addEventListener('change', () => loadEvents().catch(error => toast(error.message)));
 $('#state-filter').addEventListener('change', () => loadEvents().catch(error => toast(error.message)));
-$('#refresh-activity').addEventListener('click', () => loadEvents().catch(error => toast(error.message)));
-$('#load-more').addEventListener('click', () => loadEvents(true).catch(error => toast(error.message)));
+$('#refresh-activity').addEventListener('click', () => loadEvents(true).catch(error => toast(error.message)));
+
 $('#settings-form').addEventListener('submit', async event => {
   event.preventDefault(); const form = event.currentTarget, button = $('button[type=submit]', form); button.disabled = true;
   try {

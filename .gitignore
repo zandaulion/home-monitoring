@@ -48,3 +48,10 @@ qa/
 .agents/
 .codex/
 .aws/
+output/
+dist/
+# Only reviewed, reproducibly generated showcase images may be published.
+!docs/images/portfolio/desktop.png
+!docs/images/portfolio/tablet.png
+!docs/images/portfolio/mobile.png
+!docs/images/portfolio/activity.png

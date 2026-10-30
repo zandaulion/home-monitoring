@@ -35,12 +35,47 @@ class Store:
             CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS events_recent ON events(last_seen DESC);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS camera_periods(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), state TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL);
+            CREATE INDEX IF NOT EXISTS camera_periods_recent ON camera_periods(camera_id,end DESC);
+            CREATE TABLE IF NOT EXISTS alert_snoozes(id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL);
         """)
         for camera in cameras:
             self.db.execute("INSERT OR IGNORE INTO cameras(id,name) VALUES(?,?)", (camera["id"], camera["name"]))
         for key, value in {"retention_days": 7, "storage_limit_mb": 2048, "recognition_threshold": 0.50, "monitoring_enabled": True, "alert_cooldown_minutes": 5, "alerts_snoozed_until": 0}.items():
             self.db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)", (key, json.dumps(value)))
+        until = self.settings()["alerts_snoozed_until"]
+        now = time.time()
+        if until > now and not self.rows("SELECT id FROM alert_snoozes WHERE end>?", (now,)):
+            # On upgrade, only the remaining snooze is known, not its original start.
+            self.db.execute("INSERT INTO alert_snoozes(start,end) VALUES(?,?)", (now, until))
         self.db.commit()
+
+    def record_coverage(self, camera_id, state, now=None):
+        """Heartbeats expire after 100s; gaps remain unknown, never assumed quiet."""
+        now = time.time() if now is None else now
+        with self.lock:
+            recent = self.rows("SELECT * FROM camera_periods WHERE camera_id=? ORDER BY end DESC LIMIT 1", (camera_id,))
+            if recent and recent[0]["state"] == state and recent[0]["end"] >= now:
+                self.execute("UPDATE camera_periods SET end=? WHERE id=?", (now + 100, recent[0]["id"]))
+            else:
+                if recent and recent[0]["end"] > now:
+                    self.execute("UPDATE camera_periods SET end=? WHERE id=?", (now, recent[0]["id"]))
+                self.execute("INSERT INTO camera_periods(camera_id,state,start,end) VALUES(?,?,?,?)", (camera_id, state, now, now + 100))
+
+    def event_details(self, ids):
+        if not ids:
+            return []
+        rows = self.rows("SELECT * FROM events WHERE id IN (" + ",".join("?" for _ in ids) + ") ORDER BY last_seen DESC", ids)
+        return self.describe_events(rows)
+
+    def describe_events(self, rows):
+        names = {p["id"]: p["name"] for p in self.people()}
+        for row in rows:
+            row["faces"] = json.loads(row["faces"])
+            for face in row["faces"]:
+                face.pop("embedding", None)
+                face["name"] = names.get(face.get("person_id"))
+        return rows
 
     def rows(self, sql, params=()):
         with self.lock:
@@ -82,13 +117,7 @@ class Store:
             params.append(before)
         params.append(limit)
         rows = self.rows("SELECT * FROM events WHERE " + " AND ".join(clauses) + " ORDER BY last_seen DESC LIMIT ?", params)
-        names = {p["id"]: p["name"] for p in self.people()}
-        for row in rows:
-            row["faces"] = json.loads(row["faces"])
-            for face in row["faces"]:
-                face.pop("embedding", None)
-                face["name"] = names.get(face.get("person_id"))
-        return rows
+        return self.describe_events(rows)
 
     def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None):
         now = now or time.time()
@@ -120,6 +149,9 @@ class Store:
         with self.lock:
             settings = self.settings()
             cutoff = time.time() - settings["retention_days"] * 86400
+            self.execute("DELETE FROM camera_periods WHERE end<?", (cutoff,))
+            self.execute("UPDATE camera_periods SET start=? WHERE start<?", (cutoff, cutoff))
+            self.execute("DELETE FROM alert_snoozes WHERE end<?", (cutoff,))
             for row in self.rows("SELECT id FROM events WHERE last_seen<?", (cutoff,)):
                 self.delete_event(row["id"])
             # Remove orphan media left by a crash between file and database writes.

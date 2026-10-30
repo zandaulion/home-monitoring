@@ -67,6 +67,8 @@ class Push:
                 );
                 CREATE TABLE IF NOT EXISTS push_cooldown(camera_id TEXT PRIMARY KEY,last_queued REAL NOT NULL);
             """)
+            if "sent_at" not in {row["name"] for row in store.rows("PRAGMA table_info(push_jobs)")}:
+                store.db.execute("ALTER TABLE push_jobs ADD COLUMN sent_at REAL")
 
     def subscribe(self, device_id, subscription):
         clean = validate_subscription(subscription)
@@ -150,7 +152,7 @@ class Push:
             if code in (404, 410):
                 self.unsubscribe(job["device_id"])
             elif code is not None and 200 <= code < 300:
-                self.store.execute("UPDATE push_jobs SET state='sent' WHERE id=?", (job["id"],))
+                self.store.execute("UPDATE push_jobs SET state='sent',sent_at=? WHERE id=?", (time.time(), job["id"]))
                 self.store.execute("UPDATE push_subscriptions SET last_sent=?,last_error=NULL WHERE device_id=?", (time.time(), job["device_id"]))
             else:
                 retry = (code is None or code == 429 or code >= 500) and job["attempts"] < 2

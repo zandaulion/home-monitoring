@@ -1,0 +1,24 @@
+name: Bug report
+description: Report a reproducible issue using synthetic examples.
+body:
+  - type: markdown
+    attributes:
+      value: "Keep camera images, faces, databases, credentials, device identifiers, and deployment addresses private. Report vulnerabilities through SECURITY.md."
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps, expected result, and actual result
+      description: Use invented camera IDs and synthetic examples only.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: Python version, OS/architecture, and browser version. No hostnames, addresses, credentials, or device serial numbers.

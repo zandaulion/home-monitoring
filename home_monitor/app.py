@@ -111,7 +111,7 @@ def create_app(config=None, vision=None, push_sender=None):
             build.update(str(file.relative_to(STATIC)).encode())
             build.update(file.read_bytes())
     build_version = build.hexdigest()[:12]
-    shell_paths = {"/", "/manifest.webmanifest", "/sw.js", "/sw-update.js", "/pwa-update.js", "/bust", "/assets/bust.js", "/assets/app.js", "/assets/style.css", "/api/session", "/api/invites/redeem"}
+    shell_paths = {"/", "/manifest.webmanifest", "/sw.js", "/sw-update.js", "/pwa-update.js", "/bust", "/assets/bust.js", "/assets/app.js", "/assets/timeline.js", "/assets/style.css", "/api/session", "/api/invites/redeem"}
     icon_names = {"icon.svg", "icon-192.png", "icon-512.png", "icon-maskable.png", "apple-touch-icon.png"}
     shell_paths.update("/icons/"+name for name in icon_names)
     camera_ids = {c["id"] for c in config["cameras"]}
@@ -195,7 +195,7 @@ def create_app(config=None, vision=None, push_sender=None):
 
     @app.get("/assets/{name}")
     def static(name: str):
-        if name not in {"app.js", "style.css", "bust.js"}:
+        if name not in {"app.js", "timeline.js", "style.css", "bust.js"}:
             raise HTTPException(404)
         return FileResponse(STATIC / name)
 
@@ -357,6 +357,38 @@ def create_app(config=None, vision=None, push_sender=None):
     def events(camera: str | None = None, state: str | None = None, before: float | None = None, limit: int = 60):
         return store.events(camera, state, before, max(1, min(limit, 100)))
 
+    @app.get("/api/timeline")
+    def timeline(start: float = Query(ge=0, allow_inf_nan=False), end: float = Query(ge=0, allow_inf_nan=False), camera: str | None = None, state: str | None = None):
+        if not 0 < end - start <= 25 * 3600:
+            raise HTTPException(422, "Choose a period of up to one day")
+        if camera and camera not in camera_ids:
+            raise HTTPException(422, "Unknown camera")
+        if state and state not in {"known", "unknown", "unavailable"}:
+            raise HTTPException(422, "Unknown recognition filter")
+        clauses, params = ["last_seen>=?", "first_seen<?"], [start, end]
+        if camera:
+            clauses.append("camera_id=?")
+            params.append(camera)
+        if state:
+            clauses.append("state=?")
+            params.append(state)
+        with store.lock:
+            # Compact metadata for the whole day, independent of snapshot pagination.
+            rows = store.rows("SELECT id,camera_id,first_seen,last_seen,state,person_count,image_at FROM events WHERE " + " AND ".join(clauses) + " ORDER BY last_seen DESC,id", params)
+            notifications = store.rows("SELECT event_id,MIN(sent_at) AS at FROM push_jobs WHERE state='sent' AND sent_at>=? AND sent_at<? AND event_id IS NOT NULL GROUP BY event_id", (start, end))
+            coverage = store.rows("SELECT camera_id,state,start,end FROM camera_periods WHERE end>? AND start<?", (start, end))
+            snoozes = store.rows("SELECT start,end FROM alert_snoozes WHERE end>? AND start<?", (start, end))
+        ids = {row["id"] for row in rows}
+        now = time.time()
+        return {"start": start, "end": end, "events": rows, "notifications": [row for row in notifications if row["event_id"] in ids], "coverage": [{**row, "end": min(row["end"], now)} for row in coverage if row["start"] <= now and (not camera or row["camera_id"] == camera)], "snoozes": snoozes}
+
+    @app.get("/api/timeline/events")
+    def timeline_events(ids: str = Query(max_length=2000)):
+        selected = ids.split(",")
+        if len(selected) > 60 or any(not re.fullmatch(r"[a-f0-9]{32}", item) for item in selected):
+            raise HTTPException(422, "Choose up to 60 events")
+        return store.event_details(selected)
+
     @app.get("/api/cameras/{camera_id}/image")
     def camera_image(camera_id: str):
         if camera_id not in camera_ids:
@@ -495,7 +527,11 @@ def create_app(config=None, vision=None, push_sender=None):
     @app.post("/api/alerts/snooze")
     def snooze_alerts(minutes: int = Query(ge=0, le=480)):
         with store.lock:
-            until = time.time() + minutes * 60 if minutes else 0
+            now = time.time()
+            until = now + minutes * 60 if minutes else 0
+            store.execute("UPDATE alert_snoozes SET end=? WHERE end>?", (now, now))
+            if minutes:
+                store.execute("INSERT INTO alert_snoozes(start,end) VALUES(?,?)", (now, until))
             store.execute("UPDATE settings SET value=? WHERE key='alerts_snoozed_until'", (json.dumps(until),))
             if minutes:
                 store.execute("UPDATE push_jobs SET state='cancelled' WHERE state='pending' AND event_id IS NOT NULL")
@@ -523,12 +559,14 @@ def create_app(config=None, vision=None, push_sender=None):
             settings = store.settings()
             if not settings["monitoring_enabled"]:
                 store.execute("UPDATE cameras SET last_seen=?,error=NULL WHERE id=?", (now, camera_id))
+                store.record_coverage(camera_id, "paused", now)
                 return {"ok": True, "paused": True}
             frame = engine.decode(data)
             result = engine.analyze(frame, store.samples(), settings["recognition_threshold"])
             write_image(store.root / "latest" / f"{camera_id}.jpg", engine.jpeg(frame))
             h, w = frame.shape[:2]
             store.execute("UPDATE cameras SET last_seen=?,error=NULL,inference_ms=?,width=?,height=? WHERE id=?", (now, result["elapsed_ms"], w, h, camera_id))
+            store.record_coverage(camera_id, "online", now)
             face_rows, crops = [], []
             for face in result["faces"]:
                 pid = face["person_id"]
@@ -599,6 +637,7 @@ def create_app(config=None, vision=None, push_sender=None):
         error = payload.get("error")
         error = error if error in {"camera_unreachable", "camera_auth", "capture_failed"} else None
         store.execute("UPDATE cameras SET last_seen=?,error=? WHERE id=?", (time.time(), error, camera_id))
+        store.record_coverage(camera_id, "error" if error else "online" if store.settings()["monitoring_enabled"] else "paused")
         return {"ok": True, "monitoring_enabled": store.settings()["monitoring_enabled"]}
 
     return app

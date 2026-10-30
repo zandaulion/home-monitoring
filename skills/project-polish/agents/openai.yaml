@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Polish"
+  short_description: "Polish public repos and reproducible deployments"
+  default_prompt: "Use $project-polish to prepare this project for a polished public release and a reproducible fresh installation."

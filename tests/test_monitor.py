@@ -367,3 +367,68 @@ def test_alert_snooze_and_cooldown_settings(setup):
     settings['alert_cooldown_minutes'] = 0
     assert client.put('/api/settings', headers=OWNER, json=settings).status_code == 422
     assert client.post('/api/alerts/snooze?minutes=60').status_code == 401
+
+
+def test_timeline_includes_whole_day_and_crossing_events_without_private_faces(setup):
+    client, store, _ = setup
+    start = time.time() - 86400
+    for index in range(125):
+        store.record_event('camera-1', 'unknown' if index % 2 else 'known', 1, [], b'synthetic', [], now=start+index*650)
+    crossing = store.record_event('camera-1', 'unavailable', 1, [], b'synthetic', [], now=start-20)
+    store.execute('UPDATE events SET last_seen=? WHERE id=?', (start+10, crossing))
+    result = client.get('/api/timeline', params={'start':start, 'end':start+86400}, headers=OWNER)
+    assert result.status_code == 200
+    body = result.json()
+    assert len(body['events']) == 126
+    assert all('faces' not in row for row in body['events'])
+    filtered = client.get('/api/timeline', params={'start':start,'end':start+86400,'state':'unknown'}, headers=OWNER).json()
+    assert len(filtered['events']) == 62
+    ids = ','.join(row['id'] for row in body['events'][:12])
+    details = client.get('/api/timeline/events', params={'ids':ids}, headers=OWNER)
+    assert details.status_code == 200
+    assert len(details.json()) == 12
+    assert client.get('/api/timeline',params={'start':start,'end':start+90001},headers=OWNER).status_code == 422
+    assert client.get('/api/timeline',params={'start':start,'end':start},headers=OWNER).status_code == 422
+    assert client.get('/api/timeline',params={'start':'nan','end':start},headers=OWNER).status_code == 422
+    assert client.get('/api/timeline',params={'start':start,'end':start+60,'state':'bad'},headers=OWNER).status_code == 422
+    assert client.get('/api/timeline/events',params={'ids':'bad'},headers=OWNER).status_code == 422
+    assert client.get('/api/timeline',params={'start':start,'end':start+60}).status_code == 401
+    assert client.get('/assets/timeline.js').status_code == 200
+
+
+def test_timeline_tracks_snooze_coverage_and_retention(setup):
+    client, store, _ = setup
+    now = time.time()
+    store.record_coverage('camera-1','online',now-400)
+    store.record_coverage('camera-1','online',now-350)
+    store.record_coverage('camera-1','error',now-300)
+    store.record_coverage('camera-1','online',now-50)
+    periods = store.rows('SELECT * FROM camera_periods ORDER BY start')
+    assert len(periods) == 3
+    assert periods[0]['end'] == now-300
+    assert periods[1]['end'] == now-200  # A missing heartbeat is unknown, not an extended outage.
+    assert client.post('/api/alerts/snooze?minutes=60',headers=OWNER).status_code == 200
+    assert client.post('/api/alerts/snooze?minutes=0',headers=OWNER).status_code == 200
+    response = client.get('/api/timeline',params={'start':now-500,'end':now+3600},headers=OWNER).json()
+    assert len(response['coverage']) == 3
+    assert all(period['end'] <= time.time() for period in response['coverage'])
+    assert len(response['snoozes']) == 1
+    assert response['snoozes'][0]['end'] < now+10
+    store.execute('INSERT INTO alert_snoozes(start,end) VALUES(?,?)',(now-10*86400,now-9*86400))
+    store.record_coverage('camera-1','online',now-10*86400)
+    store.cleanup()
+    assert all(period['end'] > now-7*86400 for period in store.rows('SELECT * FROM camera_periods'))
+    assert len(store.rows('SELECT * FROM alert_snoozes')) == 1
+
+
+def test_timeline_alert_marker_hides_subscription_data(setup):
+    client, store, _ = setup
+    now = time.time()
+    eid = store.record_event('camera-1','unknown',1,[],b'synthetic',[],now=now-10)
+    device, _ = client.app.state.accounts.owner_device()
+    store.execute('INSERT INTO push_subscriptions(device_id,endpoint,p256dh,auth,created_at) VALUES(?,?,?,?,?)',(device,'https://example.invalid/synthetic','synthetic-key','synthetic-auth',now))
+    store.execute("INSERT INTO push_jobs(device_id,event_id,payload,created_at,next_try,state,sent_at) VALUES(?,?,?,?,?,'sent',?)",(device,eid,'{}',now-5,now,now))
+    result = client.get('/api/timeline',params={'start':now-60,'end':now+60},headers=OWNER).json()
+    assert result['notifications'] == [{'event_id':eid,'at':now}]
+    assert 'endpoint' not in json.dumps(result)
+    assert 'synthetic-key' not in json.dumps(result)
