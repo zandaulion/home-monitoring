@@ -1,3 +1,4 @@
+const STATES = ['person','vehicle','animal','known','unknown','unavailable'];
 // The graph uses event spans, never infers a person's identity across cameras.
 export function groupActivity(list) {
   const groups = [], latest = new Map();
@@ -18,7 +19,7 @@ export function dayBounds(value) {
   return [start.getTime()/1000, end.getTime()/1000];
 }
 export function hourlyBins(events, start, end) {
-  const bins = Array.from({length:Math.ceil((end-start)/3600)}, (_, i) => ({start:start+i*3600, end:Math.min(end,start+(i+1)*3600), person:0, known:0, unknown:0, unavailable:0}));
+  const bins = Array.from({length:Math.ceil((end-start)/3600)}, (_, i) => ({start:start+i*3600, end:Math.min(end,start+(i+1)*3600), person:0, vehicle:0, animal:0, known:0, unknown:0, unavailable:0}));
   for (const event of events) {
     const index = Math.floor((Math.max(start,event.first_seen)-start)/3600);
     if (bins[index]) bins[index][event.state]++;
@@ -60,8 +61,8 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
     });
   }
   function drawOverview() {
-    const bins = hourlyBins(data.events,data.start,data.end), maximum = Math.max(1,...bins.map(bin=>bin.person+bin.known+bin.unknown+bin.unavailable));
-    $('timeline-overview').innerHTML = `<div class="timeline-overview-heading"><strong>Day overview</strong><span>${data.events.length} events · ${maximum} in busiest hour</span></div><div class="timeline-histogram" role="img" aria-label="Hourly event counts for the selected day">${bins.map(bin=>`<div class="timeline-bin" title="${esc(time(bin.start))}: ${bin.person+bin.known+bin.unknown+bin.unavailable} events">${['person','known','unknown','unavailable'].map(state=>`<span class="${state}" data-height="${bin[state]/maximum*100}"></span>`).join('')}</div>`).join('')}<div class="timeline-window" ${spanStyle(range[0],range[1],data.start,data.end)}></div></div><div class="timeline-day-axis"><span>${esc(time(data.start))}</span><span>${esc(time((data.start+data.end)/2))}</span><span>${esc(time(data.end))}</span></div>`;
+    const bins = hourlyBins(data.events,data.start,data.end), maximum = Math.max(1,...bins.map(bin=>STATES.reduce((sum,state)=>sum+bin[state],0)));
+    $('timeline-overview').innerHTML = `<div class="timeline-overview-heading"><strong>Day overview</strong><span>${data.events.length} events · ${maximum} in busiest hour</span></div><div class="timeline-histogram" role="img" aria-label="Hourly event counts for the selected day">${bins.map(bin=>`<div class="timeline-bin" title="${esc(time(bin.start))}: ${STATES.reduce((sum,state)=>sum+bin[state],0)} events">${STATES.map(state=>`<span class="${state}" data-height="${bin[state]/maximum*100}"></span>`).join('')}</div>`).join('')}<div class="timeline-window" ${spanStyle(range[0],range[1],data.start,data.end)}></div></div><div class="timeline-day-axis"><span>${esc(time(data.start))}</span><span>${esc(time((data.start+data.end)/2))}</span><span>${esc(time(data.end))}</span></div>`;
     applyPositions($('timeline-overview'));
     $('timeline-overview').querySelector('.timeline-histogram').addEventListener('click', event => {
       const rect = event.currentTarget.getBoundingClientRect();
@@ -154,7 +155,7 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
     const next=await api('/timeline?'+key);
     if (version!==request) return;
     if (fingerprint!==key) { selectedId=null; range=null; snapshotIds=[]; details=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; }
-    if(!getStatus().settings.recognition_enabled)next.events.forEach(event=>{event.state='person';});
+    if(!getStatus().settings.recognition_enabled)next.events.forEach(event=>{if(['known','unknown','unavailable'].includes(event.state))event.state='person';});
     fingerprint=key; data=next; groups=groupActivity(data.events);
     if (!range) { const zoom=$('timeline-zoom').value; const latest=data.events[0]?.last_seen??(start+end)/2; setRange(latest,zoom==='day'?end-start:Number(zoom)); }
     $('timeline-status').textContent=data.events.length?`${data.events.length} events across ${new Set(data.events.map(event=>event.camera_id)).size} cameras · ${fullDate(start).split(',')[0]}`:'No activity recorded for this day and these filters.';

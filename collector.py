@@ -120,16 +120,18 @@ def run_camera(camera, config):
                 LOG.info("%s connection restored", camera_id)
             failures = 0
         except urllib.error.HTTPError as exception:
-            failures += 1
-            # Never log exception strings: they can contain credential-bearing URLs.
-            error = "camera_auth" if exception.code in {401, 403} and exception.url.startswith(camera["snapshot_url"]) else "capture_failed"
-            if failures == 1 or failures % 10 == 0:
-                LOG.warning("%s request failed (HTTP %s)", camera_id, exception.code)
-        except Exception:
+            # The server skipped one frame to bound its work; the camera is fine.
+            if exception.code != 429:
+                failures += 1
+                # Never log exception strings: they can contain credential-bearing URLs.
+                error = "camera_auth" if exception.code in {401, 403} and exception.url.startswith(camera["snapshot_url"]) else "capture_failed"
+                if failures == 1 or failures % 10 == 0:
+                    LOG.warning("%s request failed (HTTP %s)", camera_id, exception.code)
+        except Exception as exception:
             failures += 1
             error = "camera_unreachable"
             if failures == 1 or failures % 10 == 0:
-                LOG.warning("%s temporarily unreachable", camera_id)
+                LOG.warning("%s temporarily unreachable (%s)", camera_id, type(exception).__name__)
         if error:
             try:
                 send("/heartbeat", json.dumps({"error": error}).encode(), "application/json")

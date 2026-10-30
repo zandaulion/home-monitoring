@@ -107,7 +107,7 @@ the templates. The watchdog logs generic collector messages to syslog.
 
 ## Optional public PWA and invitation console
 
-Use the public-proxy installer described in the main README, then point a tunnel
+Use the public-proxy installer described in [docs/REFERENCE.md](../docs/REFERENCE.md#pwa-and-invitation-console), then point a tunnel
 hostname at its loopback listener. Keep tunnel credentials and DNS/account
 identifiers in private system configuration or ignored runtime storage. The
 public hostname must match `public_origin` and `public_base_url` in the server

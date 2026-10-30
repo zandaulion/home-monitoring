@@ -47,7 +47,7 @@ class Store:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         for camera in cameras:
             self.db.execute("INSERT OR IGNORE INTO cameras(id,name) VALUES(?,?)", (camera["id"], camera["name"]))
-        for key, value in {"retention_days": 7, "storage_limit_mb": 2048, "recognition_threshold": 0.50, "monitoring_enabled": True, "alert_cooldown_minutes": 5, "alerts_snoozed_until": 0, "recognition_enabled": True, "alert_mode": "always", "alert_schedule_start": "22:00", "alert_schedule_end": "06:00", "alert_timezone": "UTC", "away_mode": False, "auto_away": False, "offline_alerts": True, "presence_home": None, "presence_at": 0}.items():
+        for key, value in {"retention_days": 7, "storage_limit_mb": 2048, "recognition_threshold": 0.50, "monitoring_enabled": True, "alert_cooldown_minutes": 5, "alerts_snoozed_until": 0, "recognition_enabled": True, "alert_mode": "always", "alert_schedule_start": "22:00", "alert_schedule_end": "06:00", "alert_timezone": "UTC", "away_mode": False, "auto_away": False, "offline_alerts": True, "alert_vehicles": False, "alert_animals": False, "presence_home": None, "presence_at": 0}.items():
             self.db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)", (key, json.dumps(value)))
         until = self.settings()["alerts_snoozed_until"]
         now = time.time()

@@ -36,6 +36,8 @@ These previews show the interface, not recognition accuracy.*
   is a setting, and turning it off skips all face processing.
 - Sends person alerts always, on a schedule, or when you are away (by button or by
   phones leaving the home network), plus alerts when a camera stops reporting.
+- Records vehicles and animals that move, with optional alerts; parked vehicles
+  stay quiet.
 - Keeps up to five photos per event and leads with the clearest one.
 - Uses device invitations and revocable access, plus generic encrypted Web Push
   alerts for unidentified people, including when no face is visible. Payloads

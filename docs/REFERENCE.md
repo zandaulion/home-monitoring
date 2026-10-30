@@ -129,7 +129,8 @@ can rotate access onto the same device record so it can be moved into an install
 PWA. Rotation invalidates the previous browser's token. Expired, cancelled, or
 revoked access cannot be revived by reusing the code. The tailnet owner can still
 access the private owner URL without a device cookie; the public URL always
-requires an activated device. An invalid/revoked cookie fails closed instead of
+requires an activated device. Opening the app renews a device's access; a device
+unused for 400 days expires and needs a new invitation. An invalid/revoked cookie fails closed instead of
 falling back to the private owner bypass.
 
 The collector needs only Pillow and a private config:
@@ -206,6 +207,13 @@ cannot resolve faces. Faces are then neither detected nor stored, events have a
 single `person` state, and each person alert fires on the first observation
 because a fast intruder may only appear once. Enrolled samples are kept unused;
 remove them from the face library if they are no longer wanted.
+
+**Vehicles and animals.** The person model also reports cars, trucks, buses,
+motorcycles, bicycles, cats, dogs, horses, sheep and cows. They are recorded as
+Activity when they appear in a new position, so a parked car stays quiet, and
+anything visible when a camera first reports after a restart is treated as
+scenery. Their alerts are off by default and are separate settings. People always
+take priority: a frame with a person is a person event.
 
 **When alerts fire.** Person alerts can be always on, limited to a daily schedule
 in the time zone of the device that saved it, or off. A schedule can cross

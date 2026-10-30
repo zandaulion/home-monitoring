@@ -55,7 +55,7 @@ class Access:
         if not token or len(token) > 200:
             return None
         with self.store.lock:
-            rows = self.store.rows("SELECT id,label,last_seen FROM access_devices WHERE token_hash=? AND revoked=0 AND created_at>?", (digest(token), time.time()-MAX_AGE))
+            rows = self.store.rows("SELECT id,label,last_seen FROM access_devices WHERE token_hash=? AND revoked=0 AND COALESCE(last_seen,created_at)>?", (digest(token), time.time()-MAX_AGE))
             if not rows:
                 return None
             device = rows[0]

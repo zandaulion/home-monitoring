@@ -10,7 +10,7 @@ import pytest
 
 from home_monitor.app import create_app
 from home_monitor.store import Store
-from home_monitor.vision import Vision, choose_identity
+from home_monitor.vision import ObjectTracker, Vision, choose_identity
 
 OWNER = {"Tailscale-User-Login": "owner@example.invalid"}
 COLLECTOR = {"Authorization": "Bearer synthetic-collector-token"}
@@ -18,12 +18,13 @@ COLLECTOR = {"Authorization": "Bearer synthetic-collector-token"}
 
 class SyntheticVision:
     people = []
+    objects = []
     faces = []
     decode = staticmethod(Vision.decode)
     jpeg = staticmethod(Vision.jpeg)
 
     def analyze(self, frame, samples, threshold, find_faces=True):
-        return {"people": self.people, "faces": self.faces if find_faces else [], "elapsed_ms": 12}
+        return {"people": self.people, "objects": self.objects, "faces": self.faces if find_faces else [], "elapsed_ms": 12}
 
     def enroll(self, data):
         self.decode(data)
@@ -164,6 +165,89 @@ def test_reject_invalid_images(setup):
     client, *_ = setup
     response = client.post("/api/ingest/camera-1/frame", content=b"not an image", headers=COLLECTOR)
     assert response.status_code == 422
+
+
+def test_small_face_flag_can_be_stored_as_json(tmp_path):
+    class Detector:
+        def setInputSize(self, size):
+            pass
+
+        def detect(self, frame):
+            return 1, np.array([[10, 10, 20, 20] + [0] * 11], dtype=np.float32)
+
+    engine = Vision.__new__(Vision)
+    engine.detector = Detector()
+    faces = engine._faces(np.full((240, 320, 3), 100, np.uint8))
+    assert faces[0]["usable"] is False
+    json.dumps({"usable": faces[0]["usable"]})
+
+
+CAR = {"kind": "vehicle", "box": [10, 10, 100, 60], "score": 0.8}
+CAT = {"kind": "animal", "box": [200, 150, 40, 30], "score": 0.8}
+
+
+def test_tracker_treats_first_view_as_scenery_and_reports_only_movement():
+    tracker = ObjectTracker()
+    assert tracker.moving("camera", [CAR], 0) == []
+    assert tracker.moving("camera", [CAR], 15) == []
+    arriving = {**CAR, "box": [150, 40, 100, 60]}
+    assert tracker.moving("camera", [CAR, arriving], 30) == [arriving]
+    assert tracker.moving("camera", [CAR, arriving], 45) == []
+    # Unseen for ten minutes: the same spot counts as a new arrival.
+    assert tracker.moving("camera", [CAR], 700) == [CAR]
+
+
+def test_parked_vehicle_makes_no_events_but_a_new_one_does(setup, jpeg):
+    client, store, engine = setup
+    engine.objects = [CAR]
+    for _ in range(2):
+        time.sleep(0.51)
+        assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["people"] == 0
+    assert store.events() == []
+    engine.objects = [CAR, {**CAR, "box": [150, 40, 100, 60]}]
+    time.sleep(0.51)
+    assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["state"] == "vehicle"
+    event = store.events()[0]
+    assert event["state"] == "vehicle" and event["person_count"] == 0
+    assert client.get("/api/timeline", params={"start": 1, "end": 2, "state": "vehicle"}, headers=OWNER).status_code == 200
+
+
+def test_person_takes_priority_over_a_moving_object(setup, jpeg):
+    client, store, engine = setup
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    time.sleep(0.51)
+    engine.objects = [CAT]
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.9}]
+    assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["state"] == "unavailable"
+
+
+def activate(client, store):
+    code = client.app.state.accounts.create_invite("Synthetic phone")["code"]
+    client.post("/api/invites/redeem", json={"code": code})
+    return client.app.state.accounts.devices()[0]["id"]
+
+
+def test_opening_the_app_renews_access(setup):
+    client, store, engine = setup
+    activate(client, store)
+    response = client.get("/api/session")
+    assert response.json()["device"]
+    cookie = response.headers["set-cookie"]
+    assert f"Max-Age={400*86400}" in cookie and "HttpOnly" in cookie and "Secure" in cookie
+
+
+def test_session_without_a_device_sets_no_cookie(setup):
+    client, store, engine = setup
+    assert "set-cookie" not in client.get("/api/session", headers=OWNER).headers
+
+
+def test_expiry_follows_use_not_activation_date(setup):
+    client, store, engine = setup
+    device = activate(client, store)
+    store.execute("UPDATE access_devices SET created_at=?,last_seen=? WHERE id=?", (time.time()-500*86400, time.time()-30*86400, device))
+    assert client.get("/api/status").status_code == 200
+    store.execute("UPDATE access_devices SET last_seen=? WHERE id=?", (time.time()-401*86400, device))
+    assert client.get("/api/status").status_code == 401
 
 
 def test_paused_monitoring_does_not_store_images(setup, jpeg):

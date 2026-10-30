@@ -18,3 +18,4 @@ body.person-only [data-recognition]{display:none!important}body:not(.person-only
 .settings-panel form h2,#settings-form h2{margin-top:18px}
 .alert-status strong,.alert-status>span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.alert-strip>.button{white-space:nowrap}
 @media(max-width:760px){.alert-strip>.button{padding:8px 10px}}
+.pill.vehicle{background:#e6edf3;color:#46677f}.pill.animal{background:#f1ece3;color:#7d6a45}.timeline-bin .vehicle,.timeline-segment.vehicle,.timeline-key.vehicle{background:#5f8aa8}.timeline-bin .animal,.timeline-segment.animal,.timeline-key.animal{background:#b39a62}

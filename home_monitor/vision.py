@@ -23,6 +23,46 @@ def choose_identity(embedding, samples, threshold=0.50, margin=0.08):
     return (winner if score >= threshold and separated else None), round(score, 4)
 
 
+OBJECT_CLASSES = {1: "vehicle", 2: "vehicle", 3: "vehicle", 5: "vehicle", 7: "vehicle", 15: "animal", 16: "animal", 17: "animal", 18: "animal", 19: "animal"}
+OBJECT_MEMORY_SECONDS = 600
+
+
+def overlap(first, second):
+    """Intersection over union of two x, y, width, height boxes."""
+    width = min(first[0] + first[2], second[0] + second[2]) - max(first[0], second[0])
+    height = min(first[1] + first[3], second[1] + second[3]) - max(first[1], second[1])
+    if width <= 0 or height <= 0:
+        return 0.0
+    shared = width * height
+    return shared / (first[2] * first[3] + second[2] * second[3] - shared)
+
+
+class ObjectTracker:
+    """Report vehicles and animals that move, never ones that stay put.
+
+    Periodic frames keep arriving, so a parked car would otherwise be an event
+    every 15 seconds. Whatever is visible when a camera first reports is scenery.
+    """
+
+    def __init__(self):
+        self.cameras = {}
+
+    def moving(self, camera_id, objects, now):
+        seen = camera_id in self.cameras
+        known = [item for item in self.cameras.get(camera_id, []) if now - item["at"] < OBJECT_MEMORY_SECONDS]
+        fresh = []
+        for item in objects:
+            match = next((old for old in known if old["kind"] == item["kind"] and overlap(old["box"], item["box"]) >= 0.6), None)
+            if match:
+                match["at"] = now
+                continue
+            known.append({"kind": item["kind"], "box": item["box"], "at": now})
+            if seen:
+                fresh.append(item)
+        self.cameras[camera_id] = known
+        return fresh
+
+
 def photo_score(frame, people, faces=()):
     """Prefer a large, sharp view of the person; a visible face outranks that."""
     boxes = [face["box"] for face in faces] or [person["box"] for person in people]
@@ -86,7 +126,8 @@ class Vision:
             raise ValueError("Could not encode image")
         return result.tobytes()
 
-    def _people(self, frame):
+    def _detect(self, frame):
+        """People and objects from one model pass; COCO classes start at column 5."""
         h, w = frame.shape[:2]
         ratio = min(self.size / h, self.size / w)
         resized = cv2.resize(frame, (int(w * ratio), int(h * ratio)))
@@ -97,17 +138,23 @@ class Vision:
         # Upstream nano ONNX exports raw predictions (decode_in_inference=False).
         output[:, :2] = (output[:, :2] + self.grid) * self.strides
         output[:, 2:4] = np.exp(np.clip(output[:, 2:4], -10, 10)) * self.strides
-        scores = output[:, 4] * output[:, 5]  # COCO class 0 is person.
-        selected = scores >= 0.45
-        output, scores = output[selected], scores[selected]
-        boxes = []
-        for row in output:
-            x, y, bw, bh = row[:4] / ratio
-            x1, y1 = max(0, float(x - bw / 2)), max(0, float(y - bh / 2))
-            x2, y2 = min(w, float(x + bw / 2)), min(h, float(y + bh / 2))
-            boxes.append([x1, y1, max(0, x2 - x1), max(0, y2 - y1)])
-        indices = cv2.dnn.NMSBoxes(boxes, scores.tolist(), 0.45, 0.45)
-        return [{"box": [round(v) for v in boxes[int(i)]], "score": round(float(scores[int(i)]), 3)} for i in np.asarray(indices).flatten()][:12]
+
+        def boxes_for(column, threshold):
+            scores = output[:, 4] * output[:, column]
+            selected = scores >= threshold
+            rows, scores = output[selected], scores[selected]
+            boxes = []
+            for row in rows:
+                x, y, bw, bh = row[:4] / ratio
+                x1, y1 = max(0, float(x - bw / 2)), max(0, float(y - bh / 2))
+                x2, y2 = min(w, float(x + bw / 2)), min(h, float(y + bh / 2))
+                boxes.append([x1, y1, max(0, x2 - x1), max(0, y2 - y1)])
+            indices = cv2.dnn.NMSBoxes(boxes, scores.tolist(), threshold, 0.45)
+            return [{"box": [round(v) for v in boxes[int(i)]], "score": round(float(scores[int(i)]), 3)} for i in np.asarray(indices).flatten()]
+
+        people = boxes_for(5, 0.45)[:12]  # COCO class 0 is person.
+        objects = [{**found, "kind": kind} for number, kind in OBJECT_CLASSES.items() for found in boxes_for(5 + number, 0.5)]
+        return people, objects[:12]
 
     def _faces(self, frame):
         h, w = frame.shape[:2]
@@ -128,7 +175,7 @@ class Vision:
                 continue
             crop = frame[y1:y2, x1:x2]
             blur = float(cv2.Laplacian(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), cv2.CV_64F).var())
-            usable = min(fw, fh) >= 45 and blur >= 35
+            usable = bool(min(fw, fh) >= 45 and blur >= 35)
             feature = None
             if usable:
                 aligned = self.recognizer.alignCrop(frame, face)
@@ -140,11 +187,11 @@ class Vision:
     def analyze(self, frame, samples, threshold=0.50, find_faces=True):
         start = time.monotonic()
         with self.lock:
-            people = self._people(frame)
+            people, objects = self._detect(frame)
             faces = self._faces(frame) if find_faces else []
             for face in faces:
                 face["person_id"], face["similarity"] = choose_identity(face["embedding"], samples, threshold) if face["usable"] else (None, None)
-        return {"people": people, "faces": faces, "elapsed_ms": round((time.monotonic() - start) * 1000)}
+        return {"people": people, "objects": objects, "faces": faces, "elapsed_ms": round((time.monotonic() - start) * 1000)}
 
     def enroll(self, data):
         frame = self.decode(data)

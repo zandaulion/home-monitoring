@@ -242,6 +242,13 @@ def test_alert_state_precedence_and_time_zone(push_setup):
     assert alert_state(store.settings(), noon_utc)["reason"] == "away"
 
 
+def test_object_alerts_have_their_own_wording(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    push.enqueue_event("camera-test", store.record_event("camera-test", "animal", 0, [], b"synthetic", []))
+    push.deliver_one()
+    assert deliveries[0][1]["title"] == "Animal detected"
+
+
 def test_disarmed_alerts_record_activity_without_a_job(push_setup):
     store, accounts, push, device_id, deliveries = push_setup
     set_values(store, alert_mode="off")

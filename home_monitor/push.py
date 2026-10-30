@@ -17,7 +17,8 @@ from .access import MAX_AGE
 ALERT_LIFETIME_SECONDS = 900
 OFFLINE_AFTER_SECONDS = 300
 PRESENCE_FRESH_SECONDS = 300
-ALERTING_STATES = {"person", "unknown", "unavailable"}
+ALERTING_STATES = {"person", "unknown", "unavailable", "vehicle", "animal"}
+OBJECT_ALERTS = {"vehicle": ("Vehicle detected", "A vehicle was seen on your cameras. Open Home Monitor to review."), "animal": ("Animal detected", "An animal was seen on your cameras. Open Home Monitor to review.")}
 
 
 def in_window(start, end, moment):
@@ -122,6 +123,8 @@ class Push:
     def payload(test=False, state=None, event_id=None):
         if test:
             title, body = "Home Monitor test", "Notifications are working. You can close Home Monitor and still receive alerts."
+        elif state in OBJECT_ALERTS:
+            title, body = OBJECT_ALERTS[state]
         elif state == "person":
             title, body = "Person detected", "Someone was seen on your cameras. Open Home Monitor to review."
         else:
@@ -150,7 +153,7 @@ class Push:
                 self.store.execute("INSERT INTO push_cooldown VALUES(?,?) ON CONFLICT(camera_id) DO UPDATE SET last_queued=excluded.last_queued", (camera_id, now))
 
     def devices(self, now):
-        return self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND d.created_at>?", (now-MAX_AGE,))
+        return self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND COALESCE(d.last_seen,d.created_at)>?", (now-MAX_AGE,))
 
     def notify_health(self, title, body, tag, now):
         message = {"title": title, "body": body, "tag": tag, "expires_at": now+ALERT_LIFETIME_SECONDS}
@@ -208,7 +211,7 @@ class Push:
             now = time.time()
             self.store.execute("UPDATE push_jobs SET state='expired' WHERE state='pending' AND created_at<?", (now-ALERT_LIFETIME_SECONDS,))
             self.store.execute("DELETE FROM push_jobs WHERE event_id IS NULL AND created_at<?", (now-86400,))
-            rows = self.store.rows("SELECT j.*,s.endpoint,s.p256dh,s.auth FROM push_jobs j JOIN push_subscriptions s ON s.device_id=j.device_id JOIN access_devices d ON d.id=j.device_id WHERE j.state='pending' AND j.next_try<=? AND d.revoked=0 AND d.created_at>? ORDER BY j.id LIMIT 1", (now, now-MAX_AGE))
+            rows = self.store.rows("SELECT j.*,s.endpoint,s.p256dh,s.auth FROM push_jobs j JOIN push_subscriptions s ON s.device_id=j.device_id JOIN access_devices d ON d.id=j.device_id WHERE j.state='pending' AND j.next_try<=? AND d.revoked=0 AND COALESCE(d.last_seen,d.created_at)>? ORDER BY j.id LIMIT 1", (now, now-MAX_AGE))
             if not rows:
                 return False
             job = rows[0]

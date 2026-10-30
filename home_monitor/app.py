@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .store import MAX_PHOTOS, Store, write_image
-from .vision import Vision, photo_score
+from .vision import ObjectTracker, Vision, photo_score
 from .access import Access, COOKIE, MAX_AGE, TTL_DAYS
 from .push import ALERTING_STATES, Push, alert_state
 
@@ -52,6 +52,8 @@ class SettingsInput(BaseModel):
     alert_timezone: str = Field(default="UTC", max_length=64)
     auto_away: bool = False
     offline_alerts: bool = True
+    alert_vehicles: bool = False
+    alert_animals: bool = False
 
     @field_validator("alert_timezone")
     @classmethod
@@ -81,6 +83,7 @@ def create_app(config=None, vision=None, push_sender=None):
     latest_processed = {}
     votes = {}
     unidentified_observations = {}
+    tracker = ObjectTracker()
     storage_bytes = store.cleanup()
 
     async def cleanup_loop():
@@ -249,7 +252,10 @@ def create_app(config=None, vision=None, push_sender=None):
         return FileResponse(STATIC / "bust.html", headers={"Clear-Site-Data": '"cache"'})
 
     @app.get("/api/session")
-    def session(request: Request):
+    def session(request: Request, response: Response):
+        # Opening the app renews its access, so only unused devices expire.
+        if request.state.device:
+            response.set_cookie(COOKIE, request.cookies[COOKIE], max_age=MAX_AGE, httponly=True, secure=True, samesite="strict", path="/")
         return {"authorized": request.state.authorized, "owner": request.state.owner, "device": {"id": request.state.device["id"], "label": request.state.device["label"]} if request.state.device else None}
 
     class Redemption(BaseModel):
@@ -385,7 +391,7 @@ def create_app(config=None, vision=None, push_sender=None):
             raise HTTPException(422, "Choose a period of up to one day")
         if camera and camera not in camera_ids:
             raise HTTPException(422, "Unknown camera")
-        if state and state not in {"person", "known", "unknown", "unavailable"}:
+        if state and state not in {"person", "vehicle", "animal", "known", "unknown", "unavailable"}:
             raise HTTPException(422, "Unknown recognition filter")
         clauses, params = ["last_seen>=?", "first_seen<?"], [start, end]
         if camera:
@@ -619,7 +625,8 @@ def create_app(config=None, vision=None, push_sender=None):
                 if not votes[key] or now - votes[key][-1] > 20:
                     del votes[key]
             person_count = max(len(result["people"]), len(face_rows))
-            if not person_count:
+            moving = tracker.moving(camera_id, result.get("objects", []), now)
+            if not person_count and not moving:
                 unidentified_observations.pop(camera_id, None)
                 return {"ok": True, "people": 0}
             usable = [f for f in face_rows if f["usable"]]
@@ -629,15 +636,24 @@ def create_app(config=None, vision=None, push_sender=None):
                 state = "unavailable"
             if not recognition:
                 state = "person"
+            if not person_count:
+                state = "vehicle" if any(item["kind"] == "vehicle" for item in moving) else "animal"
             annotated = frame.copy()
             for person in result["people"]:
                 x, y, bw, bh = person["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (135, 185, 120), 2)
+            for item in moving:
+                x, y, bw, bh = item["box"]
+                cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (200, 170, 90), 2)
             for face in face_rows:
                 x, y, bw, bh = face["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (120, 210, 150) if face["person_id"] else (80, 180, 235), 2)
-            score = photo_score(frame, result["people"], face_rows)
+            score = photo_score(frame, result["people"] or moving, face_rows)
             event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score)
+            if state in {"vehicle", "animal"}:
+                if settings[f"alert_{state}s"]:
+                    push.enqueue_event(camera_id, event_id)
+                return {"ok": True, "people": 0, "event_id": event_id, "state": state}
             previous_at, count = unidentified_observations.get(camera_id, (0, 0))
             if state in ALERTING_STATES:
                 count = count+1 if now - previous_at < 20 else 1
@@ -667,7 +683,7 @@ def create_app(config=None, vision=None, push_sender=None):
             raise HTTPException(404)
         now = time.monotonic()
         # Bound work and never build a backlog if the collector is misconfigured.
-        if now - latest_processed.get(camera_id, 0) < 0.8:
+        if now - latest_processed.get(camera_id, 0) < 0.5:
             raise HTTPException(429, "Camera sampling too fast")
         latest_processed[camera_id] = now
         data = await image_bytes(request)
