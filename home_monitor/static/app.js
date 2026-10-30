@@ -46,6 +46,7 @@ function captureInvitation() {
 function showActivation(message = '') {
   authorized = false; status = null; events = [];
   activityTimeline.reset();
+  $('#startup').hidden = true;
   closeModal(); $('#dashboard').hidden = true; $('#activation').hidden = false;
   for (const id of ['camera-grid','recent-events','all-events','people-grid','camera-settings']) $('#'+id).replaceChildren();
   $('#activation-description').textContent = message || 'Activate this device with an invitation from your administrator to view your home.';
@@ -60,7 +61,7 @@ async function boot() {
     // The kit may reload on first install. Keep an explicit invitation open
     // across that reload instead of silently returning to owner access.
     if (invitation || $('#invite-code').value || !session.authorized) { showActivation(); return; }
-    authorized = true; $('#activation').hidden = true; $('#dashboard').hidden = false;
+    authorized = true; $('#startup').hidden = true; $('#activation').hidden = true; $('#dashboard').hidden = false;
     await refresh(); await navigate();
   } catch { showActivation('Home is currently unreachable. Check your internet connection and try again. Camera recording continues independently.'); }
 }
@@ -71,7 +72,7 @@ $('#activation-form').addEventListener('submit', async event => {
   try {
     await api('/invites/redeem', json('POST', {code:$('#invite-code').value.trim()}));
     sessionStorage.removeItem('home-monitor:invite'); $('#invite-code').value = ''; delete form.dataset.dirty;
-    authorized = true; $('#activation').hidden = true; $('#dashboard').hidden = false;
+    authorized = true; $('#startup').hidden = true; $('#activation').hidden = true; $('#dashboard').hidden = false;
     await refresh(); await navigate(); toast('This device is activated. Welcome home.');
   } catch (error) { $('#activation-error').textContent = error.message; $('#activation-error').hidden = false; }
   finally { button.disabled = false; }

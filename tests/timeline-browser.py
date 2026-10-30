@@ -90,6 +90,14 @@ def run():
                         assert box['y'] != other['y'] or box['x']+box['width'] <= other['x'] or other['x']+other['width'] <= box['x']
             assert not errors,errors
             touch.close()
+            # A missing module must leave a visible recovery screen, not a blank PWA.
+            recovery=browser.new_context(service_workers='block')
+            broken=recovery.new_page()
+            broken.route('**/assets/timeline.js',lambda route:route.fulfill(status=401,content_type='application/json',body='{}'))
+            broken.goto('http://127.0.0.1:8767/')
+            expect(broken.locator('#startup')).to_be_visible()
+            expect(broken.get_by_role('link',name='Refresh app files')).to_have_attribute('href','/bust')
+            recovery.close()
             browser.close()
         server.should_exit=True;thread.join(5)
 
