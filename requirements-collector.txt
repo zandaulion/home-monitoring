@@ -1,2 +1,2 @@
 -c constraints.txt
-pillow==11.3.0
+pillow==13.0.0
