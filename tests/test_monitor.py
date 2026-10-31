@@ -632,3 +632,51 @@ def test_no_visible_face_queues_after_repeated_person_observations(setup, jpeg, 
     response=client.post('/api/ingest/camera-1/frame',content=jpeg,headers=COLLECTOR)
     assert response.status_code==200
     assert queued==[response.json()['event_id']]
+
+
+def test_every_event_gets_a_clip_with_auth_playback_and_retention(setup, jpeg):
+    client, store, engine = setup
+    engine.people = [{'box': [10, 10, 80, 160]}]
+    eid = client.post('/api/ingest/camera-1/frame', content=jpeg, headers=COLLECTOR).json()['event_id']
+    event = store.events()[0]
+    pending = client.get('/api/ingest/camera-1/recordings', headers=COLLECTOR).json()
+    assert pending['requests'] == [{'event_id': eid, 'start': event['first_seen'], 'end': event['last_seen'], 'through': None}]
+    assert client.get(f'/api/events/{eid}/recording', headers=OWNER).json() == {'ready': False, 'complete': False, 'preparing': True}
+    video = b'\x00\x00\x00\x18ftypisom' + b'synthetic-video' * 200
+    path = f"/api/ingest/camera-1/recordings/{eid}/video?through={event['last_seen']}&complete=true"
+    assert client.post(path, content=video, headers=OWNER).status_code == 401
+    assert client.post(path.replace('camera-1', 'other'), content=video, headers=COLLECTOR).status_code == 404
+    assert client.post(path, content=b'bad', headers=COLLECTOR).status_code == 422
+    assert client.post(path, content=video, headers=COLLECTOR).status_code == 200
+    assert client.get(f'/api/events/{eid}/video', headers=COLLECTOR).status_code == 401
+    assert client.get(f'/api/events/{eid}/recording', headers=OWNER).json() == {'ready': True, 'complete': True, 'preparing': False}
+    response = client.get(f'/api/events/{eid}/video', headers={**OWNER, 'Range': 'bytes=0-11'})
+    assert response.status_code == 206
+    assert response.content == video[:12]
+    assert response.headers['cache-control'] == 'no-store'
+    assert client.get('/api/ingest/camera-1/recordings', headers=COLLECTOR).json()['requests'] == []
+    assert client.post(path, content=video, headers={**COLLECTOR, 'Content-Length': '64000001'}).status_code == 413
+    store.delete_event(eid)
+    assert client.get(f'/api/events/{eid}/video', headers=OWNER).status_code == 404
+
+
+def test_no_recorder_means_no_preparing_message(setup, jpeg):
+    client, store, engine = setup
+    engine.people = [{'box': [10, 10, 80, 160]}]
+    eid = client.post('/api/ingest/camera-1/frame', content=jpeg, headers=COLLECTOR).json()['event_id']
+    assert client.get(f'/api/events/{eid}/recording', headers=OWNER).json()['preparing'] is False
+
+
+def test_a_visit_that_continues_asks_for_a_longer_clip_up_to_the_limit(setup, jpeg):
+    client, store, engine = setup
+    engine.people = [{'box': [10, 10, 80, 160]}]
+    eid = client.post('/api/ingest/camera-1/frame', content=jpeg, headers=COLLECTOR).json()['event_id']
+    event = store.events()[0]
+    video = b'\x00\x00\x00\x18ftypisom' + b'x' * 50
+    assert client.post(f"/api/ingest/camera-1/recordings/{eid}/video?through={event['last_seen']}", content=video, headers=COLLECTOR).status_code == 200
+    assert client.get(f'/api/events/{eid}/recording', headers=OWNER).json()['complete'] is False
+    store.execute('UPDATE events SET last_seen=? WHERE id=?', (event['first_seen']+60, eid))
+    assert client.get('/api/ingest/camera-1/recordings', headers=COLLECTOR).json()['requests'][0]['through'] == event['last_seen']
+    start = time.time()-400
+    store.execute('UPDATE events SET first_seen=?,last_seen=?,clip_through=? WHERE id=?', (start, time.time(), start+300, eid))
+    assert client.get('/api/ingest/camera-1/recordings', headers=COLLECTOR).json()['requests'] == []

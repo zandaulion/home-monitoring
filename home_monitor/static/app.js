@@ -269,6 +269,27 @@ function showPersonEvent(event) {
 }
 
 function wireEvent(event) {
+  const recording = document.createElement('div');
+  recording.dataset.eventVideo = event.id;
+  $('#event-photo').after(recording);
+  const checkVideo = async () => {
+    try {
+      const result = await api(`/events/${event.id}/recording`);
+      if (!recording.isConnected || !modal.open) return;
+      if (result.ready) {
+        const note = result.complete ? 'Event video · from 20 seconds before to 20 seconds after' : 'Event video · some footage is missing';
+        recording.innerHTML = `<p class="modal-note">${note}</p><video class="modal-image" controls playsinline preload="metadata" src="/api/events/${event.id}/video"></video>`;
+        clearInterval(modalTimer);
+      } else if (result.preparing) {
+        recording.textContent = 'Preparing event video…';
+      } else {
+        recording.textContent = '';
+        clearInterval(modalTimer);
+      }
+    } catch {}
+  };
+  checkVideo();
+  modalTimer = setInterval(checkVideo, 5000);
   $$('[data-photo]').forEach(button => button.addEventListener('click', () => { $('#event-photo').src = button.dataset.photo; }));
   $('#done-event').addEventListener('click', closeModal);
   $('#delete-event').addEventListener('click', async () => { if (!confirm('Delete this event and its images?')) return; try { await api(`/events/${event.id}`, {method:'DELETE'}); closeModal(); await refresh(); toast('Event deleted.'); } catch (error) { toast(error.message); } });

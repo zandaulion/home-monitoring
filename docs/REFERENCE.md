@@ -1,8 +1,9 @@
 # Home Monitor
 
-A private, snapshot-based person and face recognition system. The camera SD
-cards remain responsible for continuous video. No continuous video is copied
-to the monitoring server.
+A private, snapshot-based person and face recognition system. An optional
+[recorder](../deploy/README.md#optional-event-video) buffers video in memory near
+the cameras and uploads a clip of each event to the monitoring server.
+Camera SD recordings remain independent.
 
 ## Components
 

@@ -29,6 +29,8 @@ from .push import ALERTING_STATES, Push, alert_state
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).parent / "static"
 LOG = logging.getLogger("home_monitor")
+MAX_CLIP_SECONDS = 300
+RECORDING_WINDOW_SECONDS = 600
 
 
 class PersonInput(BaseModel):
@@ -84,6 +86,7 @@ def create_app(config=None, vision=None, push_sender=None):
     votes = {}
     unidentified_observations = {}
     tracker = ObjectTracker()
+    recorder_seen = {}
     storage_bytes = store.cleanup()
 
     async def cleanup_loop():
@@ -189,10 +192,11 @@ def create_app(config=None, vision=None, push_sender=None):
             length = int(request.headers.get("content-length", "0"))
         except ValueError:
             return JSONResponse({"detail": "Invalid request length"}, status_code=400)
-        if length > 9_000_000:
+        limit = 64_000_000 if is_ingest and request.url.path.endswith('/video') else 9_000_000
+        if length > limit:
             return JSONResponse({"detail": "Image is too large"}, status_code=413)
         response = await call_next(request)
-        response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
+        response.headers.update({"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY", "Content-Security-Policy": "default-src 'self'; media-src 'self'; img-src 'self' blob:; style-src 'self'; script-src 'self'; worker-src 'self'; manifest-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"})
         return response
 
     def valid_id(value):
@@ -436,6 +440,62 @@ def create_app(config=None, vision=None, push_sender=None):
     @app.get("/api/events/{event_id}/image")
     def event_image(event_id: str):
         return file_response(store.event_image(valid_id(event_id)))
+
+    @app.get("/api/events/{event_id}/video")
+    def event_video(event_id: str):
+        path = store.root / "events" / valid_id(event_id) / "alarm.mp4"
+        if not path.is_file():
+            raise HTTPException(404, "Alarm video is not available")
+        return FileResponse(path, media_type="video/mp4")
+
+    @app.get("/api/events/{event_id}/recording")
+    def event_recording(event_id: str):
+        valid_id(event_id)
+        rows = store.rows("SELECT camera_id,last_seen,clip_complete FROM events WHERE id=?", (event_id,))
+        if not rows:
+            raise HTTPException(404)
+        ready = (store.root / "events" / event_id / "alarm.mp4").is_file()
+        now = time.time()
+        waiting = now - recorder_seen.get(rows[0]["camera_id"], 0) < 30 and now - rows[0]["last_seen"] < 180
+        return {"ready": ready, "complete": bool(rows[0]["clip_complete"]), "preparing": waiting and not ready}
+
+    @app.get("/api/ingest/{camera_id}/recordings")
+    def recording_requests(camera_id: str):
+        if camera_id not in camera_ids:
+            raise HTTPException(404)
+        now = time.time()
+        recorder_seen[camera_id] = now
+        rows = store.rows("SELECT id AS event_id,first_seen AS start,last_seen,clip_through AS through FROM events WHERE camera_id=? AND last_seen>? ORDER BY first_seen", (camera_id, now-RECORDING_WINDOW_SECONDS))
+        jobs = [{"event_id": row["event_id"], "start": row["start"], "end": min(row["last_seen"], row["start"]+MAX_CLIP_SECONDS), "through": row["through"]} for row in rows]
+        return {"monitoring_enabled": store.settings()["monitoring_enabled"], "requests": [job for job in jobs if job["through"] is None or job["end"] > job["through"]+2]}
+
+    @app.post("/api/ingest/{camera_id}/recordings/{event_id}/video")
+    async def upload_recording(camera_id: str, event_id: str, request: Request, through: float = Query(allow_inf_nan=False), complete: bool = False):
+        valid_id(event_id)
+        if camera_id not in camera_ids or not store.rows("SELECT id FROM events WHERE id=? AND camera_id=?", (event_id, camera_id)):
+            raise HTTPException(404)
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > 64_000_000:
+                raise HTTPException(413, "Video too large")
+        if len(data) < 12 or data[4:8] != b"ftyp":
+            raise HTTPException(422, "Expected MP4 video")
+
+        def save():
+            with store.lock:
+                if not store.rows("SELECT id FROM events WHERE id=?", (event_id,)):
+                    raise HTTPException(404)
+                path = store.root / "events" / event_id / "alarm.mp4"
+                temp = path.with_suffix('.tmp')
+                with open(temp, 'wb') as file:
+                    file.write(data)
+                os.chmod(temp, 0o600)
+                temp.replace(path)
+                store.execute("UPDATE events SET clip_through=?,clip_complete=? WHERE id=?", (through, complete, event_id))
+
+        await run_in_threadpool(save)
+        return {"ok": True}
 
     @app.get("/api/events/{event_id}/photos/{index}")
     def event_photo(event_id: str, index: int):

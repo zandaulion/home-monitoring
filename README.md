@@ -5,7 +5,8 @@
 
 A self-hosted view of your cameras: selected snapshots, local person and face
 recognition, a daily activity timeline, and optional device notifications.
-Continuous video stays on the cameras' SD cards. Recognition runs on your own
+Optional event video covers each event from 20 seconds before to 20 seconds
+after it, with playback in the event window. Recognition runs on your own
 server; no external inference service receives your images.
 
 ![Home Monitor desktop preview with generated scenes](docs/images/portfolio/desktop.png)
@@ -39,6 +40,8 @@ These previews show the interface, not recognition accuracy.*
 - Records vehicles and animals that move, with optional alerts; parked vehicles
   stay quiet.
 - Keeps up to five photos per event and leads with the clearest one.
+- Optionally buffers video in memory near the cameras and attaches a clip to each
+  event, with an extra copy on a USB drive and automatic storage cleanup.
 - Uses device invitations and revocable access, plus generic encrypted Web Push
   alerts for unidentified people, including when no face is visible. Payloads
   contain no images or names.

@@ -145,3 +145,49 @@ Model weights can be downloaded again with hash verification. Recreate machine
 authentication, DNS, and tunnel configuration separately. A fresh deployment
 starts with an empty event history and face library unless you restore a private
 backup. Never upload these backups or machine-specific configuration to GitHub.
+
+## Optional event video
+
+`recorder.py` runs alongside the collector and requires FFmpeg with RTSP support.
+It keeps a rolling eleven minutes of each stream in memory, then turns each event
+into a clip. Recording never writes to the USB drive, so a slow or missing drive
+cannot interrupt it. Allow about 200 MB of memory for three cameras.
+
+Add `rtsp_url` to each camera in the private collector configuration; use the
+camera's ONVIF stream URI and the existing username/password fields. Add:
+
+```json
+"recording": {
+  "mount": "/mnt/recordings",
+  "buffer": "/tmp/home-monitor",
+  "ffmpeg": "/usr/bin/ffmpeg",
+  "retention_hours": 24,
+  "reserve_mb": 3072
+}
+```
+
+The buffer must be on tmpfs, and the recorder refuses to start otherwise. Avoid
+`/dev/shm` unless the user has lingering enabled: systemd removes a user's files
+there when their last session ends. `mount` is
+the optional USB drive that keeps a copy of each clip for seven days; without it,
+clips are stored on the server only.
+
+Run `python3 recorder.py --config .runtime/collector-config.json` under a service
+or boot watchdog, using `flock` to prevent duplicate instances. Keep a private
+umask of `0077`. FFmpeg errors are suppressed because they can contain credentials.
+Logs contain generic camera IDs and failure types only. Record video without audio.
+
+Every event gets a clip, whether or not it sent an alert: from 20 seconds before
+the event until 20 seconds after it ends, up to five minutes. A visit still going
+after 45 seconds sends a first clip early, and the finished clip replaces it.
+Footage with gaps is attached and marked as incomplete instead of being discarded.
+Clips cover events from the last ten minutes, so an outage of the server or network
+longer than that loses clips. Memory is lost in a power cut, which is why clips
+leave the machine quickly. Cameras retain their own SD recordings.
+
+A private playback copy is uploaded to the server and appears in the event
+window. It uses the same device authentication and retention/storage limits as
+snapshots, supports seeking, and is excluded from offline caching. USB clips
+expire after seven days or earlier under space pressure; server event deletion
+removes the server copy only. Monitoring pause also pauses recording when the
+recorder next reaches the server.
