@@ -18,6 +18,11 @@ export function dayBounds(value) {
   const end = new Date(start); end.setDate(end.getDate() + 1);
   return [start.getTime()/1000, end.getTime()/1000];
 }
+export function recentBounds(now) {
+  // Whole-hour bars stay put while the window moves forward.
+  const hour = Math.floor(now/3600)*3600;
+  return [hour-24*3600, now];
+}
 export function hourlyBins(events, start, end) {
   const bins = Array.from({length:Math.ceil((end-start)/3600)}, (_, i) => ({start:start+i*3600, end:Math.min(end,start+(i+1)*3600), person:0, vehicle:0, animal:0, known:0, unknown:0, unavailable:0}));
   for (const event of events) {
@@ -39,6 +44,7 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
   $('timeline-day').value = today();
   let data = null, groups = [], range = null, selectedId = null, details = [], snapshotIds = [], request = 0, selectionRequest = 0, fingerprint = '', loadingMore = false;
   const error = err => toast(err.message);
+  const recent = () => $('timeline-period').value === 'recent';
   function reset() {
     request++; selectionRequest++; data = null; groups = []; range = null; selectedId = null; details = []; snapshotIds = []; fingerprint = '';
     for (const id of ['timeline-overview','timeline-lanes','all-events']) $(id).replaceChildren();
@@ -62,7 +68,7 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
   }
   function drawOverview() {
     const bins = hourlyBins(data.events,data.start,data.end), maximum = Math.max(1,...bins.map(bin=>STATES.reduce((sum,state)=>sum+bin[state],0)));
-    $('timeline-overview').innerHTML = `<div class="timeline-overview-heading"><strong>Day overview</strong><span>${data.events.length} events · ${maximum} in busiest hour</span></div><div class="timeline-histogram" role="img" aria-label="Hourly event counts for the selected day">${bins.map(bin=>`<div class="timeline-bin" title="${esc(time(bin.start))}: ${STATES.reduce((sum,state)=>sum+bin[state],0)} events">${STATES.map(state=>`<span class="${state}" data-height="${bin[state]/maximum*100}"></span>`).join('')}</div>`).join('')}<div class="timeline-window" ${spanStyle(range[0],range[1],data.start,data.end)}></div></div><div class="timeline-day-axis"><span>${esc(time(data.start))}</span><span>${esc(time((data.start+data.end)/2))}</span><span>${esc(time(data.end))}</span></div>`;
+    $('timeline-overview').innerHTML = `<div class="timeline-overview-heading"><strong>${recent()?'Last 24 hours':'Day overview'}</strong><span>${data.events.length} events · ${maximum} in busiest hour</span></div><div class="timeline-histogram" role="img" aria-label="Hourly event counts for the selected period">${bins.map(bin=>`<div class="timeline-bin" title="${esc(time(bin.start))}: ${STATES.reduce((sum,state)=>sum+bin[state],0)} events">${STATES.map(state=>`<span class="${state}" data-height="${bin[state]/maximum*100}"></span>`).join('')}</div>`).join('')}<div class="timeline-window" ${spanStyle(range[0],range[1],data.start,data.end)}></div></div><div class="timeline-day-axis"><span>${esc(time(data.start))}</span><span>${esc(time((data.start+data.end)/2))}</span><span>${esc(time(data.end))}</span></div>`;
     applyPositions($('timeline-overview'));
     $('timeline-overview').querySelector('.timeline-histogram').addEventListener('click', event => {
       const rect = event.currentTarget.getBoundingClientRect();
@@ -146,25 +152,29 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
     draw();
   }
   async function load(force=false) {
-    if (!$('timeline-day').value) return;
-    const version=++request, [start,end]=dayBounds($('timeline-day').value);
+    if (!recent() && !$('timeline-day').value) return;
+    const version=++request, [start,end]=recent()?recentBounds(Date.now()/1000):dayBounds($('timeline-day').value);
     const params=new URLSearchParams({start,end});
     if ($('camera-filter').value) params.set('camera',$('camera-filter').value);
     if ($('state-filter').value) params.set('state',$('state-filter').value);
     const key=params.toString();
+    // The recent window moves on every refresh, but it is still the same view.
+    const view=recent()?new URLSearchParams([...params].filter(([name])=>!['start','end'].includes(name))).toString()+'&recent':key;
     const next=await api('/timeline?'+key);
     if (version!==request) return;
-    if (fingerprint!==key) { selectedId=null; range=null; snapshotIds=[]; details=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; }
+    if (fingerprint!==view) { selectedId=null; range=null; snapshotIds=[]; details=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; }
     if(!getStatus().settings.recognition_enabled)next.events.forEach(event=>{if(['known','unknown','unavailable'].includes(event.state))event.state='person';});
-    fingerprint=key; data=next; groups=groupActivity(data.events);
+    fingerprint=view; data=next; groups=groupActivity(data.events);
+    if (range && recent() && $('timeline-zoom').value==='day') range=null;
     if (!range) { const zoom=$('timeline-zoom').value; const latest=data.events[0]?.last_seen??(start+end)/2; setRange(latest,zoom==='day'?end-start:Number(zoom)); }
-    $('timeline-status').textContent=data.events.length?`${data.events.length} events across ${new Set(data.events.map(event=>event.camera_id)).size} cameras · ${fullDate(start).split(',')[0]}`:'No activity recorded for this day and these filters.';
+    $('timeline-status').textContent=data.events.length?`${data.events.length} events across ${new Set(data.events.map(event=>event.camera_id)).size} cameras · ${recent()?'Last 24 hours':fullDate(start).split(',')[0]}`:`No activity recorded for ${recent()?'the last 24 hours':'this day'} and these filters.`;
     const selected=groups.find(group=>group.events.some(event=>event.id===selectedId));
     if (selected) await selectGroup(selected,force);
     else { selectedId=null; details=[]; snapshotIds=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; $('timeline-selection-title').textContent='Select an activity period'; $('timeline-selection-note').textContent='Choose a coloured period in a camera lane to review its snapshots.'; }
     draw();
   }
   $('timeline-day').addEventListener('change',()=>load().catch(error));
+  $('timeline-period').addEventListener('change',()=>{$('timeline-day-field').hidden=recent();load().catch(error);});
   $('timeline-zoom').addEventListener('change',()=>{if(!data)return; const zoom=$('timeline-zoom').value;setRange((range[0]+range[1])/2,zoom==='day'?data.end-data.start:Number(zoom));draw();});
   $('timeline-focus').addEventListener('input',()=>{if(!data)return;if($('timeline-zoom').value==='day')$('timeline-zoom').value='7200';setRange(data.start+Number($('timeline-focus').value)*3600,Number($('timeline-zoom').value));draw();});
   for (const [id,direction] of [['timeline-prev',-1],['timeline-next',1]]) $(id).addEventListener('click',()=>{if(data){setRange((range[0]+range[1])/2+direction*(range[1]-range[0]),range[1]-range[0]);draw();}});

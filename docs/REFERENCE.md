@@ -212,7 +212,9 @@ remove them from the face library if they are no longer wanted.
 motorcycles, bicycles, cats, dogs, horses, sheep and cows. They are recorded as
 Activity when they appear in a new position, so a parked car stays quiet, and
 anything visible when a camera first reports after a restart is treated as
-scenery. Their alerts are off by default and are separate settings. People always
+scenery. Something that stays for five minutes is remembered for two days, so
+darkness cannot turn it into a new arrival, and a new position must be seen twice
+within eight seconds. A vehicle or animal seen in only one frame is not recorded. Their alerts are off by default and are separate settings. People always
 take priority: a frame with a person is a person event.
 
 **When alerts fire.** Person alerts can be always on, limited to a daily schedule
@@ -241,8 +243,9 @@ or resume them early. Snooze expires automatically and cancels queued activity
 alerts; capture and activity history continue, and test notifications remain available.
 Snooze does not recall messages already accepted by a push relay.
 
-Activity has a graphical timeline with a local-date picker, a whole-day hourly
-histogram, and one lane per camera. Zoom to six hours, two hours, or thirty
+Activity has a graphical timeline with one lane per camera and an hourly
+histogram. It opens on the last 24 hours, which follows the current time, and a
+date picker reaches any single day still retained. Zoom to six hours, two hours, or thirty
 minutes, then use the focus slider or Earlier/Later controls to move through the
 day. Clicking the histogram focuses a two-hour period. The full day's compact
 metadata loads independently of snapshot pagination, including events crossing

@@ -25,6 +25,9 @@ def choose_identity(embedding, samples, threshold=0.50, margin=0.08):
 
 OBJECT_CLASSES = {1: "vehicle", 2: "vehicle", 3: "vehicle", 5: "vehicle", 7: "vehicle", 15: "animal", 16: "animal", 17: "animal", 18: "animal", 19: "animal"}
 OBJECT_MEMORY_SECONDS = 600
+SETTLED_AFTER_SECONDS = 300
+SETTLED_MEMORY_SECONDS = 48 * 3600
+CONFIRM_WITHIN_SECONDS = 8
 
 
 def overlap(first, second):
@@ -42,22 +45,35 @@ class ObjectTracker:
 
     Periodic frames keep arriving, so a parked car would otherwise be an event
     every 15 seconds. Whatever is visible when a camera first reports is scenery.
+    Something that stays put is remembered for days because darkness can hide it
+    for hours, while the boxes along a driven path are soon forgotten. A new
+    position needs a second sighting: a dark, parked car can flicker into a single
+    frame, but anything really moving is sampled every second.
     """
 
     def __init__(self):
         self.cameras = {}
+        self.sightings = {}
+
+    @staticmethod
+    def remembered(item, now):
+        settled = item["at"] - item["first"] >= SETTLED_AFTER_SECONDS
+        return now - item["at"] < (SETTLED_MEMORY_SECONDS if settled else OBJECT_MEMORY_SECONDS)
 
     def moving(self, camera_id, objects, now):
         seen = camera_id in self.cameras
-        known = [item for item in self.cameras.get(camera_id, []) if now - item["at"] < OBJECT_MEMORY_SECONDS]
+        known = [item for item in self.cameras.get(camera_id, []) if self.remembered(item, now)]
         fresh = []
         for item in objects:
             match = next((old for old in known if old["kind"] == item["kind"] and overlap(old["box"], item["box"]) >= 0.6), None)
             if match:
                 match["at"] = now
                 continue
-            known.append({"kind": item["kind"], "box": item["box"], "at": now})
-            if seen:
+            known.append({"kind": item["kind"], "box": item["box"], "first": now, "at": now})
+            key = (camera_id, item["kind"])
+            confirmed = now - self.sightings.get(key, -CONFIRM_WITHIN_SECONDS) < CONFIRM_WITHIN_SECONDS
+            self.sightings[key] = now
+            if seen and confirmed:
                 fresh.append(item)
         self.cameras[camera_id] = known
         return fresh

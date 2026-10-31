@@ -186,15 +186,44 @@ CAR = {"kind": "vehicle", "box": [10, 10, 100, 60], "score": 0.8}
 CAT = {"kind": "animal", "box": [200, 150, 40, 30], "score": 0.8}
 
 
+def boxes(*lefts):
+    return [{**CAR, "box": [left, 40, 100, 60]} for left in lefts]
+
+
 def test_tracker_treats_first_view_as_scenery_and_reports_only_movement():
     tracker = ObjectTracker()
     assert tracker.moving("camera", [CAR], 0) == []
     assert tracker.moving("camera", [CAR], 15) == []
-    arriving = {**CAR, "box": [150, 40, 100, 60]}
-    assert tracker.moving("camera", [CAR, arriving], 30) == [arriving]
-    assert tracker.moving("camera", [CAR, arriving], 45) == []
-    # Unseen for ten minutes: the same spot counts as a new arrival.
-    assert tracker.moving("camera", [CAR], 700) == [CAR]
+    assert tracker.moving("camera", [CAR, *boxes(150)], 30) == []
+    assert tracker.moving("camera", [CAR, *boxes(150, 300)], 31) == boxes(300)
+    assert tracker.moving("camera", [CAR, *boxes(150, 300)], 45) == []
+
+
+def test_parked_car_hidden_by_darkness_stays_scenery():
+    tracker = ObjectTracker()
+    tracker.moving("camera", [], 0)
+    for now in range(100, 800, 15):
+        tracker.moving("camera", [CAR], now)
+    # Twelve dark hours, then the flickers that caused false events overnight.
+    for now in (43200, 44040, 45960, 46860, 47640):
+        assert tracker.moving("camera", [CAR], now) == []
+        assert tracker.moving("camera", [CAR], now + 1) == []
+
+
+def test_single_frame_flicker_never_counts_as_movement():
+    tracker = ObjectTracker()
+    tracker.moving("camera", [], 0)
+    for now in (100, 1000, 2000, 3000, 4000):
+        assert tracker.moving("camera", [CAR], now) == []
+
+
+def test_a_driven_path_is_movement_again_later():
+    tracker = ObjectTracker()
+    tracker.moving("camera", [], 0)
+    assert tracker.moving("camera", boxes(100), 10) == []
+    assert tracker.moving("camera", boxes(200), 11) == boxes(200)
+    assert tracker.moving("camera", boxes(100), 90000) == []
+    assert tracker.moving("camera", boxes(200), 90001) == boxes(200)
 
 
 def test_parked_vehicle_makes_no_events_but_a_new_one_does(setup, jpeg):
@@ -205,6 +234,9 @@ def test_parked_vehicle_makes_no_events_but_a_new_one_does(setup, jpeg):
         assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["people"] == 0
     assert store.events() == []
     engine.objects = [CAR, {**CAR, "box": [150, 40, 100, 60]}]
+    time.sleep(0.51)
+    assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["people"] == 0
+    engine.objects = [CAR, {**CAR, "box": [300, 40, 100, 60]}]
     time.sleep(0.51)
     assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["state"] == "vehicle"
     event = store.events()[0]
