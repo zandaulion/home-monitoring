@@ -35,14 +35,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS cameras(id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen REAL, error TEXT, inference_ms INTEGER, width INTEGER, height INTEGER, last_frame REAL);
             CREATE TABLE IF NOT EXISTS people(id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE, embedding TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0, peak_score REAL NOT NULL DEFAULT 0);
             CREATE INDEX IF NOT EXISTS events_recent ON events(last_seen DESC);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS camera_periods(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), state TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS camera_periods_recent ON camera_periods(camera_id,end DESC);
             CREATE TABLE IF NOT EXISTS alert_snoozes(id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL);
         """)
-        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0")):
+        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0"), ("events", "peak_score", "REAL NOT NULL DEFAULT 0")):
             if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         for camera in cameras:
@@ -136,7 +136,7 @@ class Store:
         weakest = min(photos, key=lambda photo: photo["score"])
         return weakest["n"] if score >= weakest["score"] else None
 
-    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None, score=0.0):
+    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None, score=0.0, peak_score=0.0):
         now = now or time.time()
         signature = lambda items: sorted((f.get("person_id") or ("unknown" if f["usable"] else "unavailable")) for f in items)
         with self.lock:
@@ -144,6 +144,8 @@ class Store:
             merge = bool(recent and not recent[0]["corrected"] and now - recent[0]["last_seen"] < 45 and recent[0]["state"] == state and signature(json.loads(recent[0]["faces"])) == signature(faces))
             event_id = recent[0]["id"] if merge else uuid.uuid4().hex
             folder = self.root / "events" / event_id
+            if merge:
+                self.execute("UPDATE events SET peak_score=MAX(peak_score,?) WHERE id=?", (peak_score, event_id))
             photos = json.loads(recent[0]["photos"]) if merge else []
             slot = self.photo_slot(photos, now, score)
             if slot is None:
@@ -158,7 +160,7 @@ class Store:
                 for i, crop in enumerate(face_images):
                     write_image(folder / f"face-{i}.jpg", crop)
             if not merge:
-                self.execute("INSERT INTO events(id,camera_id,first_seen,last_seen,state,person_count,faces,corrected,image_at,photos) VALUES(?,?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now, json.dumps(photos)))
+                self.execute("INSERT INTO events(id,camera_id,first_seen,last_seen,state,person_count,faces,corrected,image_at,photos,peak_score) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now, json.dumps(photos), peak_score))
             elif best:
                 self.execute("UPDATE events SET last_seen=?,person_count=?,faces=?,image_at=?,photos=? WHERE id=?", (now, people_count, json.dumps(faces), now, json.dumps(photos), event_id))
             else:

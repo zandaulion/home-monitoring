@@ -205,8 +205,10 @@ service hosts on HTTPS port 443 are accepted as delivery endpoints.
 
 **Person-only mode.** Settings can turn face recognition off for cameras that
 cannot resolve faces. Faces are then neither detected nor stored, events have a
-single `person` state, and each person alert fires on the first observation
-because a fast intruder may only appear once. Enrolled samples are kept unused;
+single `person` state. A confident detection alerts on the first observation
+because a fast intruder may only appear once. A weak one, such as a tree at night,
+needs a second observation in a different place within eight seconds. Weak
+detections are recorded either way. Enrolled samples are kept unused;
 remove them from the face library if they are no longer wanted.
 
 **Vehicles and animals.** The person model also reports cars, trucks, buses,

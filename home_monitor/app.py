@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
 from .store import MAX_PHOTOS, Store, write_image
-from .vision import ObjectTracker, Vision, photo_score
+from .vision import ObjectTracker, Vision, overlap, photo_score
 from .access import Access, COOKIE, MAX_AGE, TTL_DAYS
 from .push import ALERTING_STATES, Push, alert_state
 
@@ -30,6 +30,9 @@ ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).parent / "static"
 LOG = logging.getLogger("home_monitor")
 MAX_CLIP_SECONDS = 300
+CONFIDENT_PERSON_SCORE = 0.65
+SAME_PLACE_OVERLAP = 0.7
+SECOND_SIGHTING_SECONDS = 8
 RECORDING_WINDOW_SECONDS = 600
 
 
@@ -709,17 +712,24 @@ def create_app(config=None, vision=None, push_sender=None):
                 x, y, bw, bh = face["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (120, 210, 150) if face["person_id"] else (80, 180, 235), 2)
             score = photo_score(frame, result["people"] or moving, face_rows)
-            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score)
+            peak_score = max((person.get("score", 1.0) for person in result["people"]), default=0.0)
+            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score, peak_score)
             if state in {"vehicle", "animal"}:
                 if settings[f"alert_{state}s"]:
                     push.enqueue_event(camera_id, event_id)
                 return {"ok": True, "people": 0, "event_id": event_id, "state": state}
-            previous_at, count = unidentified_observations.get(camera_id, (0, 0))
+            previous_at, count, previous_box = unidentified_observations.get(camera_id, (0, 0, None))
             if state in ALERTING_STATES:
-                count = count+1 if now - previous_at < 20 else 1
-                unidentified_observations[camera_id] = (now, count)
-                # Without faces there is nothing to wait for, and a fast intruder may appear once.
-                if count >= (2 if recognition else 1):
+                box = max((person["box"] for person in result["people"]), key=lambda item: item[2] * item[3], default=None)
+                # Trees and posts flicker in one spot at night; a person moves.
+                still = not recognition and box and previous_box and overlap(box, previous_box) >= SAME_PLACE_OVERLAP
+                count = count+1 if now - previous_at < (20 if recognition else SECOND_SIGHTING_SECONDS) and not still else 1
+                unidentified_observations[camera_id] = (now, count, box)
+                # A clear person alerts at once because a fast intruder may appear once.
+                # A weak detection needs a second sighting somewhere else. Either way
+                # the event and its video are recorded.
+                confident = not recognition and peak_score >= CONFIDENT_PERSON_SCORE
+                if count >= 2 or confident:
                     push.enqueue_event(camera_id, event_id)
             else:
                 unidentified_observations.pop(camera_id, None)

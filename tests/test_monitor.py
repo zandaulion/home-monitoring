@@ -91,6 +91,61 @@ def test_person_only_mode_skips_faces_and_labels_people(setup, jpeg):
     assert client.get("/api/timeline", params={"start": 1, "end": 2, "state": "person"}, headers=OWNER).status_code == 200
 
 
+def person_only(client, store):
+    settings = store.settings()
+    settings["recognition_enabled"] = False
+    client.put("/api/settings", json=settings, headers=OWNER)
+    device = client.app.state.accounts.create_invite("Synthetic phone")
+    client.post("/api/invites/redeem", json={"code": device["code"]})
+    device_id = client.app.state.accounts.devices()[0]["id"]
+    store.execute("INSERT INTO push_subscriptions(device_id,endpoint,p256dh,auth,created_at) VALUES(?,?,?,?,?)", (device_id, "https://fcm.googleapis.com/x", "a", "b", time.time()))
+    client.cookies.clear()
+
+
+def alerts(store):
+    return len(store.rows("SELECT id FROM push_jobs"))
+
+
+def test_confident_person_alerts_on_the_first_frame(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.72}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    assert alerts(store) == 1
+    assert store.events()[0]["peak_score"] == 0.72
+
+
+def test_weak_lone_detection_is_recorded_without_an_alert(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.47}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    assert alerts(store) == 0
+    assert len(store.events()) == 1
+
+
+def test_weak_person_who_moves_alerts_on_the_second_sighting(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.47}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    time.sleep(0.51)
+    engine.people = [{"box": [120, 10, 50, 100], "score": 0.47}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    assert alerts(store) == 1
+
+
+def test_weak_detection_flickering_in_one_spot_never_alerts(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [341, 135, 32, 88], "score": 0.52}]
+    for _ in range(4):
+        client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+        time.sleep(0.51)
+    assert alerts(store) == 0
+    assert store.events()
+
+
 def test_invalid_alert_settings_are_rejected(setup):
     client, store, engine = setup
     settings = store.settings()
