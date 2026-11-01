@@ -44,13 +44,12 @@ def run():
             context=browser.new_context(extra_http_headers={'Tailscale-User-Login':'owner@example.invalid'},viewport={'width':1280,'height':1000})
             page=context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(error.stack))
             page.goto('http://127.0.0.1:8767/#events')
-            page.wait_for_selector('#timeline-status:not(:empty)')
-            assert 'Last 24 hours' in page.locator('#timeline-overview').inner_text()
+            expect(page.locator('#timeline-overview')).to_contain_text('Last 24 hours')
             assert not page.locator('#timeline-day').is_visible()
             page.locator('#timeline-period').select_option('day')
             assert page.locator('#timeline-day').is_visible()
             page.wait_for_selector('.timeline-period')
-            assert '138 events' in page.locator('#timeline-status').inner_text()
+            expect(page.locator('#timeline-status')).to_contain_text('138 events')
             assert page.locator('.timeline-lane').count()==2
             axis=page.locator('.timeline-axis > div').last.bounding_box()
             assert axis['width'] > 300
