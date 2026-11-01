@@ -106,6 +106,80 @@ def alerts(store):
     return len(store.rows("SELECT id FROM push_jobs"))
 
 
+def test_reasons_sort_events_into_alerts_and_quiet(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.47}]
+    weak = client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["event_id"]
+    assert store.rows("SELECT alert_reason FROM events WHERE id=?", (weak,))[0]["alert_reason"] == "quiet"
+    home = client.get("/api/alerts", headers=OWNER).json()
+    assert home["alerts"] == [] and home["quiet"]["total"] == 1 and home["quiet"]["cameras"][0]["id"] == "camera-1"
+    time.sleep(0.51)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.9}]
+    assert client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()["event_id"] == weak
+    home = client.get("/api/alerts", headers=OWNER).json()
+    assert [event["alert_reason"] for event in home["alerts"]] == ["sent"] and home["quiet"]["total"] == 0
+
+
+def test_cooldown_keeps_a_real_detection_among_the_alerts(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    engine.people = [{"box": [10, 10, 50, 100], "score": 0.9}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    store.execute("UPDATE events SET last_seen=last_seen-100")
+    time.sleep(0.51)
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    reasons = [event["alert_reason"] for event in client.get("/api/alerts", headers=OWNER).json()["alerts"]]
+    assert reasons == ["cooldown", "sent"]
+
+
+def test_sent_alert_is_never_downgraded(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-1", "name": "Example"}])
+    eid = store.record_event("camera-1", "person", 1, [], b"x", [])
+    store.mark_alert(eid, "sent")
+    store.mark_alert(eid, "cooldown")
+    store.mark_alert(eid, "quiet")
+    assert store.rows("SELECT alert_reason FROM events")[0]["alert_reason"] == "sent"
+    store.db.close()
+
+
+def test_timeline_filters_alerts_and_quiet(setup):
+    client, store, engine = setup
+    now = time.time()
+    alert = store.record_event("camera-1", "person", 1, [], b"x", [], now=now-100)
+    quiet = store.record_event("camera-1", "person", 1, [], b"x", [], now=now-50)
+    store.mark_alert(alert, "sent")
+    store.mark_alert(quiet, "quiet")
+    view = lambda level: [row["id"] for row in client.get("/api/timeline", params={"start": now-1000, "end": now, "level": level}, headers=OWNER).json()["events"]]
+    assert view("alerts") == [alert] and view("quiet") == [quiet]
+    assert client.get("/api/timeline", params={"start": now-1000, "end": now, "level": "other"}, headers=OWNER).status_code == 422
+
+
+def test_quiet_events_expire_after_two_days_and_alerts_stay(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-1", "name": "Example"}])
+    now = time.time()
+    quiet = store.record_event("camera-1", "person", 1, [], b"x", [], now=now-3*86400)
+    alert = store.record_event("camera-1", "person", 1, [], b"x", [], now=now-3*86400+100)
+    store.mark_alert(quiet, "quiet")
+    store.mark_alert(alert, "sent")
+    store.cleanup()
+    assert [event["id"] for event in store.events()] == [alert]
+    store.db.close()
+
+
+def test_storage_limit_removes_quiet_events_before_older_alerts(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-1", "name": "Example"}])
+    now = time.time()
+    alert = store.record_event("camera-1", "person", 1, [], b"x"*800_000, [], now=now-1000)
+    quiet = store.record_event("camera-1", "person", 1, [], b"y"*800_000, [], now=now-100)
+    store.mark_alert(alert, "sent")
+    store.mark_alert(quiet, "quiet")
+    store.execute("UPDATE settings SET value='1' WHERE key='storage_limit_mb'")
+    store.cleanup()
+    assert [event["id"] for event in store.events()] == [alert]
+    store.db.close()
+
+
 def test_confident_person_alerts_on_the_first_frame(setup, jpeg):
     client, store, engine = setup
     person_only(client, store)

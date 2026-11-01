@@ -9,6 +9,8 @@ import uuid
 
 MAX_PHOTOS = 5
 PHOTO_SPACING_SECONDS = 2
+QUIET_RETENTION_DAYS = 2
+QUIET = "COALESCE(alert_reason,'quiet')='quiet'"
 
 
 def write_image(path, data):
@@ -35,14 +37,14 @@ class Store:
             CREATE TABLE IF NOT EXISTS cameras(id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen REAL, error TEXT, inference_ms INTEGER, width INTEGER, height INTEGER, last_frame REAL);
             CREATE TABLE IF NOT EXISTS people(id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE, embedding TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0, peak_score REAL NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0, peak_score REAL NOT NULL DEFAULT 0, alert_reason TEXT);
             CREATE INDEX IF NOT EXISTS events_recent ON events(last_seen DESC);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS camera_periods(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), state TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS camera_periods_recent ON camera_periods(camera_id,end DESC);
             CREATE TABLE IF NOT EXISTS alert_snoozes(id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL);
         """)
-        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0"), ("events", "peak_score", "REAL NOT NULL DEFAULT 0")):
+        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0"), ("events", "peak_score", "REAL NOT NULL DEFAULT 0"), ("events", "alert_reason", "TEXT")):
             if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         for camera in cameras:
@@ -167,6 +169,21 @@ class Store:
                 self.execute("UPDATE events SET last_seen=?,person_count=?,photos=? WHERE id=?", (now, people_count, json.dumps(photos), event_id))
             return event_id
 
+    def mark_alert(self, event_id, reason):
+        """Record why an event did or did not alert; a sent alert stays sent."""
+        if reason == "quiet":
+            self.execute("UPDATE events SET alert_reason='quiet' WHERE id=? AND alert_reason IS NULL", (event_id,))
+        else:
+            self.execute("UPDATE events SET alert_reason=? WHERE id=? AND COALESCE(alert_reason,'')<>'sent'", (reason, event_id))
+
+    def alerts(self, limit=10):
+        rows = self.rows(f"SELECT * FROM events WHERE NOT {QUIET} ORDER BY last_seen DESC LIMIT ?", (limit,))
+        return self.describe_events(rows)
+
+    def quiet_summary(self, since):
+        cameras = self.rows(f"SELECT e.camera_id AS id,c.name,count(*) AS count,max(e.last_seen) AS latest FROM events e JOIN cameras c ON c.id=e.camera_id WHERE {QUIET} AND e.first_seen>? GROUP BY e.camera_id ORDER BY count DESC", (since,))
+        return {"total": sum(camera["count"] for camera in cameras), "cameras": cameras}
+
     def event_image(self, event_id):
         """The best photo; events from before photo selection keep one snapshot."""
         rows = self.rows("SELECT photos FROM events WHERE id=?", (event_id,))
@@ -185,10 +202,11 @@ class Store:
         with self.lock:
             settings = self.settings()
             cutoff = time.time() - settings["retention_days"] * 86400
+            quiet_cutoff = time.time() - min(QUIET_RETENTION_DAYS, settings["retention_days"]) * 86400
             self.execute("DELETE FROM camera_periods WHERE end<?", (cutoff,))
             self.execute("UPDATE camera_periods SET start=? WHERE start<?", (cutoff, cutoff))
             self.execute("DELETE FROM alert_snoozes WHERE end<?", (cutoff,))
-            for row in self.rows("SELECT id FROM events WHERE last_seen<?", (cutoff,)):
+            for row in self.rows(f"SELECT id FROM events WHERE last_seen<? OR ({QUIET} AND last_seen<?)", (cutoff, quiet_cutoff)):
                 self.delete_event(row["id"])
             # Remove orphan media left by a crash between file and database writes.
             existing = {row["id"] for row in self.rows("SELECT id FROM events")}
@@ -201,7 +219,8 @@ class Store:
                     event_sizes[folder.name] = sum(p.stat().st_size for p in folder.iterdir() if p.is_file())
             total = sum(event_sizes.values())
             limit = settings["storage_limit_mb"] * 1024 * 1024
-            for row in self.rows("SELECT id FROM events ORDER BY last_seen"):
+            # Under pressure, weak detections go before anything that was a real alert.
+            for row in self.rows(f"SELECT id FROM events ORDER BY {QUIET} DESC,last_seen"):
                 if total <= limit:
                     break
                 self.delete_event(row["id"])

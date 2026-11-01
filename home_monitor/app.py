@@ -21,7 +21,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
 
-from .store import MAX_PHOTOS, Store, write_image
+from .store import MAX_PHOTOS, QUIET, Store, write_image
 from .vision import ObjectTracker, Vision, overlap, photo_score
 from .access import Access, COOKIE, MAX_AGE, TTL_DAYS
 from .push import ALERTING_STATES, Push, alert_state
@@ -401,8 +401,12 @@ def create_app(config=None, vision=None, push_sender=None):
     def events(camera: str | None = None, state: str | None = None, before: float | None = None, limit: int = 60):
         return store.events(camera, state, before, max(1, min(limit, 100)))
 
+    @app.get("/api/alerts")
+    def alerts():
+        return {"alerts": store.alerts(), "quiet": store.quiet_summary(time.time() - 86400)}
+
     @app.get("/api/timeline")
-    def timeline(start: float = Query(ge=0, allow_inf_nan=False), end: float = Query(ge=0, allow_inf_nan=False), camera: str | None = None, state: str | None = None):
+    def timeline(start: float = Query(ge=0, allow_inf_nan=False), end: float = Query(ge=0, allow_inf_nan=False), camera: str | None = None, state: str | None = None, level: Literal["alerts", "quiet"] | None = None):
         if not 0 < end - start <= 25 * 3600:
             raise HTTPException(422, "Choose a period of up to one day")
         if camera and camera not in camera_ids:
@@ -416,6 +420,8 @@ def create_app(config=None, vision=None, push_sender=None):
         if state:
             clauses.append("state=?")
             params.append(state)
+        if level:
+            clauses.append(QUIET if level == "quiet" else f"NOT {QUIET}")
         with store.lock:
             # Compact metadata for the whole day, independent of snapshot pagination.
             rows = store.rows("SELECT id,camera_id,first_seen,last_seen,state,person_count,image_at FROM events WHERE " + " AND ".join(clauses) + " ORDER BY last_seen DESC,id", params)
@@ -727,8 +733,7 @@ def create_app(config=None, vision=None, push_sender=None):
             peak_score = max((person.get("score", 1.0) for person in result["people"]), default=0.0)
             event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score, peak_score)
             if state in {"vehicle", "animal"}:
-                if settings[f"alert_{state}s"]:
-                    push.enqueue_event(camera_id, event_id)
+                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if settings[f"alert_{state}s"] else "quiet")
                 return {"ok": True, "people": 0, "event_id": event_id, "state": state}
             previous_at, count, previous_box = unidentified_observations.get(camera_id, (0, 0, None))
             if state in ALERTING_STATES:
@@ -741,10 +746,10 @@ def create_app(config=None, vision=None, push_sender=None):
                 # A weak detection needs a second sighting somewhere else. Either way
                 # the event and its video are recorded.
                 confident = not recognition and peak_score >= CONFIDENT_PERSON_SCORE
-                if count >= 2 or confident:
-                    push.enqueue_event(camera_id, event_id)
+                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if count >= 2 or confident else "quiet")
             else:
                 unidentified_observations.pop(camera_id, None)
+                store.mark_alert(event_id, "quiet")
             return {"ok": True, "people": person_count, "event_id": event_id, "state": state}
 
     @app.post("/api/ingest/presence")

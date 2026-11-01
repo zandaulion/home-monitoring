@@ -103,6 +103,8 @@ class Push:
             """)
             if "sent_at" not in {row["name"] for row in store.rows("PRAGMA table_info(push_jobs)")}:
                 store.db.execute("ALTER TABLE push_jobs ADD COLUMN sent_at REAL")
+            # Events from before alert reasons were kept: only a sent alert is certain.
+            store.db.execute("UPDATE events SET alert_reason='sent' WHERE alert_reason IS NULL AND id IN (SELECT event_id FROM push_jobs WHERE state='sent' AND event_id IS NOT NULL)")
 
     def subscribe(self, device_id, subscription):
         clean = validate_subscription(subscription)
@@ -139,21 +141,26 @@ class Push:
         with self.store.lock:
             now = time.time()
             settings = self.store.settings()
-            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now or not alert_state(settings, now)["armed"]:
-                return
+            if not settings["monitoring_enabled"] or settings["alerts_snoozed_until"] > now:
+                return "snoozed"
+            if not alert_state(settings, now)["armed"]:
+                return "disarmed"
             event = self.store.rows("SELECT camera_id,state FROM events WHERE id=?", (event_id,))
             if not event or event[0]["camera_id"] != camera_id or event[0]["state"] not in ALERTING_STATES:
-                return
+                return "quiet"
             devices = self.devices(now)
+            if not devices:
+                return "no_device"
             recent = self.store.rows("SELECT last_queued FROM push_cooldown WHERE camera_id=?", (camera_id,))
-            if not devices or (recent and now-recent[0]["last_queued"] < settings["alert_cooldown_minutes"] * 60):
-                return
+            if recent and now-recent[0]["last_queued"] < settings["alert_cooldown_minutes"] * 60:
+                return "cooldown"
             inserted = False
             for device in devices:
                 cursor = self.store.execute("INSERT OR IGNORE INTO push_jobs(device_id,event_id,payload,created_at,next_try) VALUES(?,?,?,?,?)", (device["device_id"], event_id, json.dumps(self.payload(state=event[0]["state"], event_id=event_id)), now, now))
                 inserted = inserted or bool(cursor.rowcount)
             if inserted:
                 self.store.execute("INSERT INTO push_cooldown VALUES(?,?) ON CONFLICT(camera_id) DO UPDATE SET last_queued=excluded.last_queued", (camera_id, now))
+            return "sent"
 
     def devices(self, now):
         return self.store.rows("SELECT s.device_id FROM push_subscriptions s JOIN access_devices d ON d.id=s.device_id WHERE d.revoked=0 AND COALESCE(d.last_seen,d.created_at)>?", (now-MAX_AGE,))

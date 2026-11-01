@@ -84,7 +84,16 @@ def run():
             print('Browser passed: whole-day counts, camera lanes, selection, pagination, zoom, focus, event modal, filters, mobile width, empty day; no JS errors')
             touch=browser.new_context(extra_http_headers={'Tailscale-User-Login':'owner@example.invalid'},viewport={'width':320,'height':812},is_mobile=True,has_touch=True)
             phone=touch.new_page();phone.on('pageerror',lambda error:errors.append(error.stack))
-            phone.goto('http://127.0.0.1:8767/#events');phone.locator('#timeline-period').select_option('day');phone.wait_for_selector('.timeline-period')
+            phone.goto('http://127.0.0.1:8767/#events');phone.locator('#timeline-period').select_option('day');phone.wait_for_selector('button.hour-cell')
+            assert phone.locator('.timeline-period').count()==0 and phone.locator('.hour-strip').count()==2
+            assert not phone.locator('.timeline-legend').is_visible() and phone.locator('.hour-key').is_visible()
+            phone.locator('button.hour-cell.level-4').first.click()
+            phone.wait_for_selector('#all-events .event-row')
+            assert phone.locator('.hour-cell.selected').count()==1
+            phone.locator('#timeline-zoom').select_option('7200')
+            phone.locator('#timeline-focus').fill('14.5');phone.locator('#timeline-focus').dispatch_event('input')
+            phone.wait_for_selector('.timeline-period')
+            assert phone.locator('.hour-strip').count()==0
             assert phone.evaluate('document.documentElement.scrollWidth <= innerWidth')
             for track in phone.locator('.timeline-track').all():
                 boxes=[button.bounding_box() for button in track.locator('[data-period]').all()]
@@ -110,6 +119,10 @@ def run():
             phone.screenshot(path=str(ROOT / '.runtime/qa/compact-alerts-mobile.png'),full_page=True)
             phone.locator('#resume-alerts').click()
             expect(phone.locator('#alert-mode')).to_have_text('Alerts on')
+            phone.goto('http://127.0.0.1:8767/#overview')
+            cards=phone.locator('.camera-card'); expect(cards).to_have_count(2)
+            assert cards.first.bounding_box()['y']==cards.last.bounding_box()['y'] and cards.first.bounding_box()['height']<180
+            assert not phone.locator('#stats').is_visible()
             expect(phone.locator('#snooze-alerts')).to_be_visible()
             touch.close()
             # A missing module must leave a visible recovery screen, not a blank PWA.

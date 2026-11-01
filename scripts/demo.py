@@ -86,7 +86,8 @@ def demo_app(port=8870, now=None):
                 stamp = now - (j*1800+i*90+120)
                 state = ("known", "unknown", "unavailable")[(i+j) % 3]
                 face = {"box": [350, 280, 35, 35], "usable": state != "unavailable", "person_id": f"{i%2+1:032x}" if state == "known" else None, "similarity": 0.74 if state == "known" else None}
-                store.record_event(camera["id"], state, 1, [face], picture, [artwork(portrait=True)], now=stamp)
+                event_id = store.record_event(camera["id"], state, 1, [face], picture, [artwork(portrait=True)], now=stamp)
+                store.mark_alert(event_id, {"unknown": "sent", "known": "quiet", "unavailable": "cooldown"}[state])
             store.execute("INSERT INTO camera_periods(camera_id,state,start,end) VALUES(?,?,?,?)", (camera["id"], "online", now-5*3600, now))
         # This is a separate app instance. Production authentication is untouched.
         @app.middleware("http")

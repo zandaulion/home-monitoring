@@ -23,6 +23,20 @@ export function recentBounds(now) {
   const hour = Math.floor(now/3600)*3600;
   return [hour-24*3600, now];
 }
+export function hourCells(events, notifications, coverage, start, end) {
+  // One cell per clock hour for one camera. Darkness comes from the event count.
+  const alerted = new Set(notifications.map(note=>note.event_id));
+  const first = new Date(start*1000); first.setMinutes(0,0,0);
+  const cells = [];
+  for (let at=first.getTime()/1000; at<end; at+=3600) {
+    const stop = at+3600, items = events.filter(event=>Math.max(event.first_seen,start)>=at && Math.max(event.first_seen,start)<stop);
+    const overlap = period=>Math.max(0,Math.min(period.end,stop)-Math.max(period.start,at));
+    cells.push({at, stop, events:items, level:!items.length?0:items.length===1?1:items.length<=3?2:items.length<=7?3:4,
+      alert:items.some(event=>alerted.has(event.id)), gap:!coverage.some(period=>overlap(period)>0),
+      problem:coverage.filter(period=>period.state==='error').reduce((sum,period)=>sum+overlap(period),0)>=60});
+  }
+  return cells;
+}
 export function hourlyBins(events, start, end) {
   const bins = Array.from({length:Math.ceil((end-start)/3600)}, (_, i) => ({start:start+i*3600, end:Math.min(end,start+(i+1)*3600), person:0, vehicle:0, animal:0, known:0, unknown:0, unavailable:0}));
   for (const event of events) {
@@ -42,11 +56,12 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
   const time = value => new Date(value*1000).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
   const today = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,'0')}-${String(date.getDate()).padStart(2,'0')}`; };
   $('timeline-day').value = today();
+  let selectedHour = null;
   let data = null, groups = [], range = null, selectedId = null, details = [], snapshotIds = [], request = 0, selectionRequest = 0, fingerprint = '', loadingMore = false;
   const error = err => toast(err.message);
   const recent = () => $('timeline-period').value === 'recent';
   function reset() {
-    request++; selectionRequest++; data = null; groups = []; range = null; selectedId = null; details = []; snapshotIds = []; fingerprint = '';
+    request++; selectionRequest++; data = null; groups = []; range = null; selectedId = null; selectedHour = null; details = []; snapshotIds = []; fingerprint = '';
     for (const id of ['timeline-overview','timeline-lanes','all-events']) $(id).replaceChildren();
     $('timeline-selection-title').textContent = 'Select an activity period'; $('timeline-selection-note').textContent = ''; $('timeline-more').hidden = true;
   }
@@ -77,8 +92,40 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
       setRange(center,Number($('timeline-zoom').value)); draw();
     });
   }
+  const hourView = () => matchMedia('(max-width:760px)').matches && range[1]-range[0] > 7200;
+  const cellsFor = camera => hourCells(data.events.filter(event=>event.camera_id===camera), data.notifications, data.coverage.filter(period=>period.camera_id===camera), range[0], range[1]);
+  function hourGroup(hour) {
+    const items = cellsFor(hour.camera).find(cell=>cell.at===hour.at)?.events;
+    return items?.length ? {camera_id:hour.camera, first_seen:Math.min(...items.map(event=>event.first_seen)), last_seen:Math.max(...items.map(event=>event.last_seen)), events:[...items].sort((a,b)=>b.last_seen-a.last_seen)} : null;
+  }
+  function drawHours(cameras) {
+    const ticks = Array.from({length:5},(_,i)=>range[0]+(range[1]-range[0])*i/4);
+    $('timeline-lanes').innerHTML = `<div class="hour-axis">${ticks.map(at=>`<span>${esc(time(at))}</span>`).join('')}</div>` + cameras.map(item=>{
+      const cells = cellsFor(item.id), total = cells.reduce((sum,cell)=>sum+cell.events.length,0);
+      return `<div class="hour-lane"><div class="hour-lane-name">${esc(item.name)}<small>${total} ${total===1?'event':'events'} · ${item.online?'Online now':'Offline now'}</small></div><div class="hour-strip" data-camera="${esc(item.id)}">${cells.map(cell=>{
+        const selected = selectedHour?.camera===item.id && selectedHour.at===cell.at;
+        const classes = `hour-cell level-${cell.level}${cell.gap?' gap':''}${cell.problem?' problem':''}${selected?' selected':''}`;
+        const mark = cell.alert?'<i aria-hidden="true">◆</i>':'';
+        return cell.events.length ? `<button type="button" class="${classes}" data-at="${cell.at}" aria-pressed="${selected}" aria-label="${esc(item.name)}, ${esc(time(cell.at))}, ${cell.events.length} ${cell.events.length===1?'event':'events'}${cell.alert?', alert sent':''}">${mark}</button>` : `<span class="${classes}"></span>`;
+      }).join('')}</div></div>`;
+    }).join('');
+    $('timeline-lanes').querySelectorAll('.hour-strip').forEach(strip=>strip.addEventListener('click',event=>{
+      const buttons = [...strip.querySelectorAll('button')];
+      // Cells are narrower than a fingertip, so a tap takes the closest busy hour.
+      let chosen = event.detail ? null : event.target.closest('button');
+      if (event.detail) {
+        const distance = button=>{const box=button.getBoundingClientRect();return Math.abs(event.clientX-(box.left+box.width/2));};
+        chosen = buttons.sort((a,b)=>distance(a)-distance(b))[0];
+        if (chosen && distance(chosen)>30) chosen = null;
+      }
+      if (!chosen) return;
+      selectedHour = {camera:strip.dataset.camera, at:Number(chosen.dataset.at)};
+      selectGroup(hourGroup(selectedHour),true).catch(error);
+    }));
+  }
   function draw() {
     if (!data) return;
+    $('page-events').classList.toggle('hour-view',hourView());
     const restoreFocus = $('timeline-lanes').contains(document.activeElement) && document.activeElement.matches('[data-period]');
     drawOverview();
     $('timeline-range').textContent = `${time(range[0])} – ${time(range[1])}`;
@@ -88,6 +135,7 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
     $('timeline-focus-label').textContent = time((range[0]+range[1])/2);
     const camera = $('camera-filter').value;
     const cameras = getStatus().cameras.filter(item=>!camera || item.id === camera);
+    if (hourView()) { drawHours(cameras); return; }
     const ticks = Array.from({length:5},(_,i)=>range[0]+(range[1]-range[0])*i/4);
     $('timeline-lanes').innerHTML = `<div class="timeline-axis"><div></div><div>${ticks.map((at,i)=>`<span class="${i%2?'optional-tick':''}" data-left="${i*25}">${esc(time(at))}</span>`).join('')}</div></div>` + cameras.map(item=>{
       const cameraGroups = groups.filter(group=>group.camera_id === item.id && clippedSpan(group.first_seen,group.last_seen,...range));
@@ -119,11 +167,10 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
       track.style.height=`${Math.max(70,24+ends.length*48)}px`;
     });
     if(restoreFocus)$('timeline-lanes').querySelector('.timeline-period.selected')?.focus({preventScroll:true});
-    $('timeline-lanes').querySelectorAll('[data-period]').forEach(button=>button.addEventListener('click',()=>selectGroup(groups[Number(button.dataset.period)],true).catch(error)));
+    $('timeline-lanes').querySelectorAll('[data-period]').forEach(button=>button.addEventListener('click',()=>{selectedHour=null;selectGroup(groups[Number(button.dataset.period)],true).catch(error);}));
   }
   async function showMore() {
-    const group=groups.find(item=>item.events.some(event=>event.id===selectedId));
-    if (!group || loadingMore) return;
+    if (!snapshotIds.length || loadingMore) return;
     loadingMore=true;
     const version=selectionRequest;
     const ids=snapshotIds.slice(details.length,details.length+12);
@@ -156,19 +203,23 @@ export function createTimeline({api, renderEvents, cameraName, esc, fullDate, to
     const version=++request, [start,end]=recent()?recentBounds(Date.now()/1000):dayBounds($('timeline-day').value);
     const params=new URLSearchParams({start,end});
     if ($('camera-filter').value) params.set('camera',$('camera-filter').value);
-    if ($('state-filter').value) params.set('state',$('state-filter').value);
+    const type=$('state-filter').value;
+    if (['alerts','quiet'].includes(type)) params.set('level',type);
+    else if (type) params.set('state',type);
     const key=params.toString();
     // The recent window moves on every refresh, but it is still the same view.
     const view=recent()?new URLSearchParams([...params].filter(([name])=>!['start','end'].includes(name))).toString()+'&recent':key;
     const next=await api('/timeline?'+key);
     if (version!==request) return;
-    if (fingerprint!==view) { selectedId=null; range=null; snapshotIds=[]; details=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; }
+    if (fingerprint!==view) { selectedId=null; selectedHour=null; range=null; snapshotIds=[]; details=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; }
     if(!getStatus().settings.recognition_enabled)next.events.forEach(event=>{if(['known','unknown','unavailable'].includes(event.state))event.state='person';});
     fingerprint=view; data=next; groups=groupActivity(data.events);
     if (range && recent() && $('timeline-zoom').value==='day') range=null;
     if (!range) { const zoom=$('timeline-zoom').value; const latest=data.events[0]?.last_seen??(start+end)/2; setRange(latest,zoom==='day'?end-start:Number(zoom)); }
     $('timeline-status').textContent=data.events.length?`${data.events.length} events across ${new Set(data.events.map(event=>event.camera_id)).size} cameras · ${recent()?'Last 24 hours':fullDate(start).split(',')[0]}`:`No activity recorded for ${recent()?'the last 24 hours':'this day'} and these filters.`;
-    const selected=groups.find(group=>group.events.some(event=>event.id===selectedId));
+    const hour=selectedHour&&hourGroup(selectedHour);
+    if (!hour) selectedHour=null;
+    const selected=hour||groups.find(group=>group.events.some(event=>event.id===selectedId));
     if (selected) await selectGroup(selected,force);
     else { selectedId=null; details=[]; snapshotIds=[]; selectionRequest++; $('all-events').replaceChildren(); $('timeline-more').hidden=true; $('timeline-selection-title').textContent='Select an activity period'; $('timeline-selection-note').textContent='Choose a coloured period in a camera lane to review its snapshots.'; }
     draw();

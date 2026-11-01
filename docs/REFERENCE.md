@@ -220,6 +220,13 @@ darkness cannot turn it into a new arrival, and a new position must be seen twic
 within eight seconds. A vehicle or animal seen in only one frame is not recorded. Their alerts are off by default and are separate settings. People always
 take priority: a frame with a person is a person event.
 
+**Alerts and quiet detections.** Each event records why it did or did not alert.
+Confident or moving detections are alerts, even when the cooldown or a snooze
+silenced their notification, and the overview lists the last ten. Weak, lone or
+stationary detections are quiet: the overview counts them per camera for the last
+24 hours, and Activity can filter by either. Quiet events are kept for two days at
+most and are removed first when storage runs short, so they cannot push out alerts.
+
 **When alerts fire.** Person alerts can be always on, limited to a daily schedule
 in the time zone of the device that saved it, or off. A schedule can cross
 midnight. Away mode turns alerts on regardless, from the app's Away button or
@@ -248,7 +255,9 @@ Snooze does not recall messages already accepted by a push relay.
 
 Activity has a graphical timeline with one lane per camera and an hourly
 histogram. It opens on the last 24 hours, which follows the current time, and a
-date picker reaches any single day still retained. Zoom to six hours, two hours, or thirty
+date picker reaches any single day still retained. On phones, views wider than two hours
+show one row per camera with one block per hour, darker for more events; tapping a
+block lists its events. Zoom to six hours, two hours, or thirty
 minutes, then use the focus slider or Earlier/Later controls to move through the
 day. Clicking the histogram focuses a two-hour period. The full day's compact
 metadata loads independently of snapshot pagination, including events crossing
