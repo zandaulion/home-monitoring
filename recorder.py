@@ -168,7 +168,8 @@ def make_clips(camera, config, buffer, state, saves):
 
     while not STOP.is_set():
         try:
-            jobs = request(base)
+            newest = segments(folder)
+            jobs = request(f'{base}?newest={stem(newest[-1]) if newest else 0}')
             state['enabled'] = jobs['monitoring_enabled']
             for job in jobs['requests']:
                 if not re.fullmatch(r'[a-f0-9]{32}', job['event_id']):

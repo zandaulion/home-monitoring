@@ -185,6 +185,12 @@ Clips cover events from the last ten minutes, so an outage of the server or netw
 longer than that loses clips. Memory is lost in a power cut, which is why clips
 leave the machine quickly. Cameras retain their own SD recordings.
 
+The recorder reports to the server every few seconds. If it stops reporting, or a
+camera's footage stops arriving, for five minutes, every device is told once, and
+again when recording returns. Settings shows the current state. These alerts use
+the camera alerts setting, ignore snooze, and stop while monitoring is paused. A
+camera that is already offline has its own alert instead.
+
 A private playback copy is uploaded to the server and appears in the event
 window. It uses the same device authentication and retention/storage limits as
 snapshots, supports seeking, and is excluded from offline caching. USB clips

@@ -17,6 +17,7 @@ from .access import MAX_AGE
 ALERT_LIFETIME_SECONDS = 900
 OFFLINE_AFTER_SECONDS = 300
 PRESENCE_FRESH_SECONDS = 300
+OUTAGE_GROUPING_SECONDS = 45
 ALERTING_STATES = {"person", "unknown", "unavailable", "vehicle", "animal"}
 OBJECT_ALERTS = {"vehicle": ("Vehicle detected", "A vehicle was seen on your cameras. Open Home Monitor to review."), "animal": ("Animal detected", "An animal was seen on your cameras. Open Home Monitor to review.")}
 
@@ -97,6 +98,8 @@ class Push:
                 );
                 CREATE TABLE IF NOT EXISTS push_cooldown(camera_id TEXT PRIMARY KEY,last_queued REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS camera_outages(camera_id TEXT PRIMARY KEY,since REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS recorder_status(camera_id TEXT PRIMARY KEY,polled_at REAL NOT NULL,stream_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS recorder_outages(camera_id TEXT PRIMARY KEY,since REAL NOT NULL);
             """)
             if "sent_at" not in {row["name"] for row in store.rows("PRAGMA table_info(push_jobs)")}:
                 store.db.execute("ALTER TABLE push_jobs ADD COLUMN sent_at REAL")
@@ -185,6 +188,46 @@ class Push:
                 if camera["id"] in known and camera["id"] not in down_ids:
                     self.store.execute("DELETE FROM camera_outages WHERE camera_id=?", (camera["id"],))
                     self.notify_health("Camera back online", f"{camera['name']} is sending snapshots again.", f"home-monitor-camera-{camera['id']}", now)
+
+    def note_recorder(self, camera_id, newest, now):
+        self.store.execute("INSERT INTO recorder_status VALUES(?,?,?) ON CONFLICT(camera_id) DO UPDATE SET polled_at=excluded.polled_at,stream_at=excluded.stream_at", (camera_id, now, newest))
+
+    def recording_problems(self, now):
+        """Cameras whose recorder went quiet, or whose footage stopped arriving."""
+        rows = self.store.rows("SELECT c.id,c.name,r.polled_at,r.stream_at FROM recorder_status r JOIN cameras c ON c.id=r.camera_id")
+        return rows, [row for row in rows if now-row["polled_at"] > OFFLINE_AFTER_SECONDS or now-row["stream_at"] > OFFLINE_AFTER_SECONDS]
+
+    def check_recorders(self, now=None):
+        """Tell every device once when video stops, and once when it returns."""
+        now = time.time() if now is None else now
+        with self.store.lock:
+            settings = self.store.settings()
+            if not settings["monitoring_enabled"] or not settings["offline_alerts"]:
+                self.store.execute("DELETE FROM recorder_outages")
+                return
+            rows, problems = self.recording_problems(now)
+            if problems:
+                # Reports are about 30 seconds apart, so one failure crosses the limit
+                # camera by camera. Include the others now to send a single message.
+                problems = self.recording_problems(now+OUTAGE_GROUPING_SECONDS)[1]
+            known = {row["camera_id"] for row in self.store.rows("SELECT camera_id FROM recorder_outages")}
+            camera_down = {row["camera_id"] for row in self.store.rows("SELECT camera_id FROM camera_outages")}
+            # A camera that is offline already has its own alert.
+            fresh = [row for row in problems if row["id"] not in known and row["id"] not in camera_down]
+            minutes = OFFLINE_AFTER_SECONDS // 60
+            if fresh and len(problems) == len(rows) and len(rows) > 1:
+                self.notify_health("Video recording has stopped", f"No event video has been recorded for {minutes} minutes. Alerts and photos still work.", "home-monitor-recording", now)
+            else:
+                for row in fresh:
+                    self.notify_health("Video recording has stopped", f"{row['name']} has not recorded video for {minutes} minutes. Alerts and photos still work.", f"home-monitor-recording-{row['id']}", now)
+            for row in fresh:
+                self.store.execute("INSERT INTO recorder_outages VALUES(?,?)", (row["id"], row["polled_at"]))
+            recovered = [row for row in rows if row["id"] in known and row["id"] not in {item["id"] for item in problems}]
+            for row in recovered:
+                self.store.execute("DELETE FROM recorder_outages WHERE camera_id=?", (row["id"],))
+            if recovered:
+                names = "All cameras" if len(recovered) == len(rows) and len(rows) > 1 else ", ".join(row["name"] for row in recovered)
+                self.notify_health("Video recording is back", f"{names}: recording again.", "home-monitor-recording", now)
 
     def test(self, device_id):
         with self.store.lock:

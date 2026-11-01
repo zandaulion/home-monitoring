@@ -90,6 +90,7 @@ def create_app(config=None, vision=None, push_sender=None):
     unidentified_observations = {}
     tracker = ObjectTracker()
     recorder_seen = {}
+    recorder_polled = {}
     storage_bytes = store.cleanup()
 
     async def cleanup_loop():
@@ -104,6 +105,10 @@ def create_app(config=None, vision=None, push_sender=None):
                 await run_in_threadpool(push.check_cameras)
             except Exception:
                 LOG.warning("Camera health check temporarily unavailable")
+            try:
+                await run_in_threadpool(push.check_recorders)
+            except Exception:
+                LOG.warning("Recorder health check temporarily unavailable")
 
     @asynccontextmanager
     async def lifespan(app):
@@ -374,6 +379,10 @@ def create_app(config=None, vision=None, push_sender=None):
             raise HTTPException(422, str(error)) from error
         return {"queued": True}
 
+    def recording_health(now):
+        rows, problems = push.recording_problems(now)
+        return {"configured": bool(rows), "stopped": [row["name"] for row in problems]}
+
     @app.get("/api/status")
     def status():
         settings = store.settings()
@@ -386,7 +395,7 @@ def create_app(config=None, vision=None, push_sender=None):
         midnight = now - 86400
         counts = store.rows("SELECT state,count(*) AS n FROM events WHERE first_seen>? GROUP BY state", (midnight,))
         disk = shutil.disk_usage(store.root)
-        return {"cameras": cameras, "settings": settings, "people": store.people(), "last_24h": {r["state"]: r["n"] for r in counts}, "storage_bytes": storage_bytes, "disk_free_bytes": disk.free, "server_time": now, "recognition_ready": bool(store.samples()), "alerts": alert_state(settings, now), "recognition_model": "SFace", "sampling_seconds": config.get("sampling_seconds", 2), "private_access": "Tailscale", "recording": "Camera SD cards"}
+        return {"cameras": cameras, "settings": settings, "people": store.people(), "last_24h": {r["state"]: r["n"] for r in counts}, "storage_bytes": storage_bytes, "disk_free_bytes": disk.free, "server_time": now, "recognition_ready": bool(store.samples()), "recorder": recording_health(now), "alerts": alert_state(settings, now), "recognition_model": "SFace", "sampling_seconds": config.get("sampling_seconds", 2), "private_access": "Tailscale", "recording": "Camera SD cards"}
 
     @app.get("/api/events")
     def events(camera: str | None = None, state: str | None = None, before: float | None = None, limit: int = 60):
@@ -459,15 +468,18 @@ def create_app(config=None, vision=None, push_sender=None):
             raise HTTPException(404)
         ready = (store.root / "events" / event_id / "alarm.mp4").is_file()
         now = time.time()
-        waiting = now - recorder_seen.get(rows[0]["camera_id"], 0) < 30 and now - rows[0]["last_seen"] < 180
+        waiting = now - recorder_polled.get(rows[0]["camera_id"], 0) < 30 and now - rows[0]["last_seen"] < 180
         return {"ready": ready, "complete": bool(rows[0]["clip_complete"]), "preparing": waiting and not ready}
 
     @app.get("/api/ingest/{camera_id}/recordings")
-    def recording_requests(camera_id: str):
+    def recording_requests(camera_id: str, newest: float = Query(default=0, allow_inf_nan=False)):
         if camera_id not in camera_ids:
             raise HTTPException(404)
         now = time.time()
-        recorder_seen[camera_id] = now
+        if now - recorder_seen.get(camera_id, 0) >= 30:
+            push.note_recorder(camera_id, newest, now)
+            recorder_seen[camera_id] = now
+        recorder_polled[camera_id] = now
         rows = store.rows("SELECT id AS event_id,first_seen AS start,last_seen,clip_through AS through FROM events WHERE camera_id=? AND last_seen>? ORDER BY first_seen", (camera_id, now-RECORDING_WINDOW_SECONDS))
         jobs = [{"event_id": row["event_id"], "start": row["start"], "end": min(row["last_seen"], row["start"]+MAX_CLIP_SECONDS), "through": row["through"]} for row in rows]
         return {"monitoring_enabled": store.settings()["monitoring_enabled"], "requests": [job for job in jobs if job["through"] is None or job["end"] > job["through"]+2]}

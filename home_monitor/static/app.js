@@ -169,6 +169,9 @@ function renderSettings() {
   $$('.camera-rename').forEach(form => form.addEventListener('submit', async event => { event.preventDefault(); try { await api(`/cameras/${form.dataset.camera}`, json('PATCH', {name:form.elements.name.value.trim()})); delete form.dataset.dirty; await refresh(); toast('Camera name saved.'); } catch (error) { toast(error.message); } }));
   $('#storage-bar').style.width = `${Math.min(100, status.storage_bytes/(status.settings.storage_limit_mb*1024**2)*100)}%`;
   $('#storage-detail').textContent = `${bytes(status.storage_bytes)} of ${bytes(status.settings.storage_limit_mb*1024**2)} event storage · ${bytes(status.disk_free_bytes)} disk space free on the server`;
+  const recording = status.recorder;
+  $('#recording-status').hidden = !recording.configured;
+  $('#recording-status').textContent = recording.stopped.length ? `Video recording has stopped: ${recording.stopped.join(', ')}.` : 'Video recording is working on all cameras.';
   renderNotifications();
 }
 

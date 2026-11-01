@@ -715,6 +715,15 @@ def test_every_event_gets_a_clip_with_auth_playback_and_retention(setup, jpeg):
     assert client.get(f'/api/events/{eid}/video', headers=OWNER).status_code == 404
 
 
+def test_recorder_reports_footage_and_status_shows_it(setup):
+    client, store, engine = setup
+    assert client.get('/api/status', headers=OWNER).json()['recorder'] == {'configured': False, 'stopped': []}
+    assert client.get(f'/api/ingest/camera-1/recordings?newest={time.time()}', headers=COLLECTOR).status_code == 200
+    assert client.get('/api/status', headers=OWNER).json()['recorder'] == {'configured': True, 'stopped': []}
+    store.execute('UPDATE recorder_status SET stream_at=?', (time.time()-400,))
+    assert client.get('/api/status', headers=OWNER).json()['recorder']['stopped'] == ['Test camera']
+
+
 def test_no_recorder_means_no_preparing_message(setup, jpeg):
     client, store, engine = setup
     engine.people = [{'box': [10, 10, 80, 160]}]

@@ -309,3 +309,72 @@ def test_camera_that_never_reported_is_not_offline(push_setup):
     store, accounts, push, device_id, deliveries = push_setup
     push.check_cameras()
     assert not store.rows("SELECT id FROM push_jobs")
+
+
+def recorders(store, push, polled, stream):
+    store.execute("DELETE FROM recorder_status")
+    now = time.time()
+    for camera in store.rows("SELECT id FROM cameras"):
+        push.note_recorder(camera["id"], now-stream, now-polled)
+
+
+def test_recorder_silence_alerts_once_then_once_on_recovery(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    recorders(store, push, 10, 10)
+    push.check_recorders()
+    assert not store.rows("SELECT id FROM push_jobs")
+    recorders(store, push, 400, 10)
+    push.check_recorders()
+    push.check_recorders()
+    assert len(store.rows("SELECT id FROM push_jobs")) == 1
+    push.deliver_one()
+    assert deliveries[-1][1]["title"] == "Video recording has stopped"
+    recorders(store, push, 5, 5)
+    push.check_recorders()
+    push.check_recorders()
+    push.deliver_one()
+    assert deliveries[-1][1]["title"] == "Video recording is back"
+    assert len(deliveries) == 2
+
+
+def test_one_recorder_failure_sends_one_message_for_all_cameras(tmp_path):
+    store = Store(tmp_path, [{"id": "camera-a", "name": "A"}, {"id": "camera-b", "name": "B"}])
+    accounts = Access(store, "https://example.invalid")
+    sent = []
+    push = Push(store, "https://example.invalid", lambda subscription, payload: sent.append(payload) or 201)
+    device_id = accounts.owner_device()[0]
+    push.subscribe(device_id, subscription())
+    now = time.time()
+    push.note_recorder("camera-a", now-310, now-310)
+    push.note_recorder("camera-b", now-280, now-280)
+    push.check_recorders(now)
+    push.check_recorders(now+60)
+    assert len(store.rows("SELECT id FROM push_jobs")) == 1
+    push.deliver_one()
+    assert sent[0]["body"].startswith("No event video")
+    store.db.close()
+
+
+def test_recorder_running_without_footage_alerts(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    recorders(store, push, 5, 400)
+    push.check_recorders()
+    assert len(store.rows("SELECT id FROM push_jobs")) == 1
+
+
+def test_no_recorder_never_alerts(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    push.check_recorders()
+    assert not store.rows("SELECT id FROM push_jobs")
+
+
+def test_offline_camera_has_only_its_own_alert_and_pause_silences(push_setup):
+    store, accounts, push, device_id, deliveries = push_setup
+    recorders(store, push, 400, 400)
+    store.execute("INSERT INTO camera_outages VALUES('camera-test',?)", (time.time(),))
+    push.check_recorders()
+    assert not store.rows("SELECT id FROM push_jobs")
+    store.execute("DELETE FROM camera_outages")
+    set_values(store, monitoring_enabled=False)
+    push.check_recorders()
+    assert not store.rows("SELECT id FROM push_jobs")
