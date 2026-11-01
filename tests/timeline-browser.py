@@ -17,6 +17,13 @@ from home_monitor.app import create_app
 class Vision:
     pass
 
+def settled(view):
+    # The first visit installs the service worker, which reloads the page once and
+    # would undo anything a test has already selected.
+    view.wait_for_function('()=>navigator.serviceWorker.controller')
+    view.wait_for_timeout(1500)
+    view.wait_for_load_state('load')
+
 def run():
     with tempfile.TemporaryDirectory(prefix='timeline-ui-') as folder:
         config={'data_dir':folder,'model_dir':folder,'cameras':[{'id':'yard','name':'Synthetic yard'},{'id':'gate','name':'Synthetic gate'}],'owner_login':'owner@example.invalid','collector_token':'synthetic','admin_token':'synthetic-diagnostic','allowed_origins':['http://127.0.0.1:8767']}
@@ -44,6 +51,7 @@ def run():
             context=browser.new_context(extra_http_headers={'Tailscale-User-Login':'owner@example.invalid'},viewport={'width':1280,'height':1000})
             page=context.new_page();errors=[];page.on('pageerror',lambda error:errors.append(error.stack))
             page.goto('http://127.0.0.1:8767/#events')
+            settled(page)
             expect(page.locator('#timeline-overview')).to_contain_text('Last 24 hours')
             assert not page.locator('#timeline-day').is_visible()
             page.locator('#timeline-period').select_option('day')
@@ -84,7 +92,7 @@ def run():
             print('Browser passed: whole-day counts, camera lanes, selection, pagination, zoom, focus, event modal, filters, mobile width, empty day; no JS errors')
             touch=browser.new_context(extra_http_headers={'Tailscale-User-Login':'owner@example.invalid'},viewport={'width':320,'height':812},is_mobile=True,has_touch=True)
             phone=touch.new_page();phone.on('pageerror',lambda error:errors.append(error.stack))
-            phone.goto('http://127.0.0.1:8767/#events');phone.locator('#timeline-period').select_option('day');phone.wait_for_selector('button.hour-cell')
+            phone.goto('http://127.0.0.1:8767/#events');settled(phone);phone.locator('#timeline-period').select_option('day');phone.wait_for_selector('button.hour-cell.level-4')
             assert phone.locator('.timeline-period').count()==0 and phone.locator('.hour-strip').count()==2
             assert not phone.locator('.timeline-legend').is_visible() and phone.locator('.hour-key').is_visible()
             phone.locator('button.hour-cell.level-4').first.click()
