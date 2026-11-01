@@ -7,10 +7,15 @@ import threading
 import time
 import uuid
 
+from .vision import overlap
+
 MAX_PHOTOS = 5
 PHOTO_SPACING_SECONDS = 2
 QUIET_RETENTION_DAYS = 2
-QUIET = "COALESCE(alert_reason,'quiet')='quiet'"
+QUIET = "COALESCE(alert_reason,'quiet') IN ('quiet','false')"
+MARK_LIFETIME_SECONDS = 30 * 86400
+MARKS_FOR_A_SPOT = 2
+SAME_SPOT_OVERLAP = 0.5
 
 
 def write_image(path, data):
@@ -37,14 +42,15 @@ class Store:
             CREATE TABLE IF NOT EXISTS cameras(id TEXT PRIMARY KEY, name TEXT NOT NULL, last_seen REAL, error TEXT, inference_ms INTEGER, width INTEGER, height INTEGER, last_frame REAL);
             CREATE TABLE IF NOT EXISTS people(id TEXT PRIMARY KEY, name TEXT NOT NULL, created REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE, embedding TEXT NOT NULL, path TEXT NOT NULL, created REAL NOT NULL);
-            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0, peak_score REAL NOT NULL DEFAULT 0, alert_reason TEXT);
+            CREATE TABLE IF NOT EXISTS events(id TEXT PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), first_seen REAL NOT NULL, last_seen REAL NOT NULL, state TEXT NOT NULL, person_count INTEGER NOT NULL, faces TEXT NOT NULL, corrected INTEGER NOT NULL DEFAULT 0, image_at REAL NOT NULL, photos TEXT NOT NULL DEFAULT '[]', clip_through REAL, clip_complete INTEGER NOT NULL DEFAULT 0, peak_score REAL NOT NULL DEFAULT 0, alert_reason TEXT, box TEXT, reason_before TEXT);
             CREATE INDEX IF NOT EXISTS events_recent ON events(last_seen DESC);
             CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS camera_periods(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), state TEXT NOT NULL, start REAL NOT NULL, end REAL NOT NULL);
             CREATE INDEX IF NOT EXISTS camera_periods_recent ON camera_periods(camera_id,end DESC);
             CREATE TABLE IF NOT EXISTS alert_snoozes(id INTEGER PRIMARY KEY, start REAL NOT NULL, end REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS false_marks(id INTEGER PRIMARY KEY, camera_id TEXT NOT NULL REFERENCES cameras(id), kind TEXT NOT NULL, box TEXT NOT NULL, score REAL NOT NULL, event_id TEXT NOT NULL UNIQUE, created REAL NOT NULL);
         """)
-        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0"), ("events", "peak_score", "REAL NOT NULL DEFAULT 0"), ("events", "alert_reason", "TEXT")):
+        for table, column, definition in (("cameras", "last_frame", "REAL"), ("events", "photos", "TEXT NOT NULL DEFAULT '[]'"), ("events", "clip_through", "REAL"), ("events", "clip_complete", "INTEGER NOT NULL DEFAULT 0"), ("events", "peak_score", "REAL NOT NULL DEFAULT 0"), ("events", "alert_reason", "TEXT"), ("events", "box", "TEXT"), ("events", "reason_before", "TEXT")):
             if column not in {row["name"] for row in self.db.execute(f"PRAGMA table_info({table})")}:
                 self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
         for camera in cameras:
@@ -138,16 +144,17 @@ class Store:
         weakest = min(photos, key=lambda photo: photo["score"])
         return weakest["n"] if score >= weakest["score"] else None
 
-    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None, score=0.0, peak_score=0.0):
+    def record_event(self, camera_id, state, people_count, faces, image, face_images, now=None, score=0.0, peak_score=0.0, box=None):
         now = now or time.time()
         signature = lambda items: sorted((f.get("person_id") or ("unknown" if f["usable"] else "unavailable")) for f in items)
         with self.lock:
             recent = self.rows("SELECT * FROM events WHERE camera_id=? ORDER BY last_seen DESC LIMIT 1", (camera_id,))
-            merge = bool(recent and not recent[0]["corrected"] and now - recent[0]["last_seen"] < 45 and recent[0]["state"] == state and signature(json.loads(recent[0]["faces"])) == signature(faces))
+            # A marked event stays closed, so a real person arriving next is a new event.
+            merge = bool(recent and not recent[0]["corrected"] and recent[0]["alert_reason"] != "false" and now - recent[0]["last_seen"] < 45 and recent[0]["state"] == state and signature(json.loads(recent[0]["faces"])) == signature(faces))
             event_id = recent[0]["id"] if merge else uuid.uuid4().hex
             folder = self.root / "events" / event_id
             if merge:
-                self.execute("UPDATE events SET peak_score=MAX(peak_score,?) WHERE id=?", (peak_score, event_id))
+                self.execute("UPDATE events SET peak_score=?,box=? WHERE id=? AND peak_score<=?", (peak_score, json.dumps(box) if box else recent[0]["box"], event_id, peak_score))
             photos = json.loads(recent[0]["photos"]) if merge else []
             slot = self.photo_slot(photos, now, score)
             if slot is None:
@@ -162,7 +169,7 @@ class Store:
                 for i, crop in enumerate(face_images):
                     write_image(folder / f"face-{i}.jpg", crop)
             if not merge:
-                self.execute("INSERT INTO events(id,camera_id,first_seen,last_seen,state,person_count,faces,corrected,image_at,photos,peak_score) VALUES(?,?,?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now, json.dumps(photos), peak_score))
+                self.execute("INSERT INTO events(id,camera_id,first_seen,last_seen,state,person_count,faces,corrected,image_at,photos,peak_score,box) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (event_id, camera_id, now, now, state, people_count, json.dumps(faces), 0, now, json.dumps(photos), peak_score, json.dumps(box) if box else None))
             elif best:
                 self.execute("UPDATE events SET last_seen=?,person_count=?,faces=?,image_at=?,photos=? WHERE id=?", (now, people_count, json.dumps(faces), now, json.dumps(photos), event_id))
             else:
@@ -174,7 +181,61 @@ class Store:
         if reason == "quiet":
             self.execute("UPDATE events SET alert_reason='quiet' WHERE id=? AND alert_reason IS NULL", (event_id,))
         else:
-            self.execute("UPDATE events SET alert_reason=? WHERE id=? AND COALESCE(alert_reason,'')<>'sent'", (reason, event_id))
+            self.execute("UPDATE events SET alert_reason=? WHERE id=? AND COALESCE(alert_reason,'') NOT IN ('sent','false')", (reason, event_id))
+
+    def mark_false(self, event_id):
+        """Move an event out of the alerts, and remember where it happened."""
+        with self.lock:
+            rows = self.rows("SELECT camera_id,state,box,peak_score,alert_reason FROM events WHERE id=?", (event_id,))
+            if not rows:
+                return None
+            event = rows[0]
+            if event["alert_reason"] != "false":
+                self.execute("UPDATE events SET reason_before=alert_reason,alert_reason='false' WHERE id=?", (event_id,))
+                self.execute("UPDATE push_jobs SET state='cancelled' WHERE event_id=? AND state='pending'", (event_id,))
+                if event["box"]:
+                    kind = event["state"] if event["state"] in {"vehicle", "animal"} else "person"
+                    self.execute("INSERT OR IGNORE INTO false_marks(camera_id,kind,box,score,event_id,created) VALUES(?,?,?,?,?,?)", (event["camera_id"], kind, event["box"], event["peak_score"], event_id, time.time()))
+            if not event["box"]:
+                return {"learned": False, "spot": False}
+            kind = event["state"] if event["state"] in {"vehicle", "animal"} else "person"
+            return {"learned": True, "spot": self.in_ignored_spot(event["camera_id"], kind, json.loads(event["box"]))}
+
+    def unmark_false(self, event_id):
+        with self.lock:
+            self.execute("UPDATE events SET alert_reason=reason_before,reason_before=NULL WHERE id=? AND alert_reason='false'", (event_id,))
+            self.execute("DELETE FROM false_marks WHERE event_id=?", (event_id,))
+
+    def mark_clusters(self, now=None):
+        now = time.time() if now is None else now
+        clusters = []
+        for mark in self.rows("SELECT * FROM false_marks WHERE created>? ORDER BY created DESC", (now-MARK_LIFETIME_SECONDS,)):
+            box = json.loads(mark["box"])
+            match = next((group for group in clusters if group["camera_id"] == mark["camera_id"] and group["kind"] == mark["kind"] and overlap(group["box"], box) >= SAME_SPOT_OVERLAP), None)
+            if match:
+                match["marks"].append(mark)
+            else:
+                clusters.append({"id": mark["id"], "camera_id": mark["camera_id"], "kind": mark["kind"], "box": box, "marks": [mark]})
+        return clusters
+
+    def ignored_spots(self, now=None):
+        spots = []
+        for group in self.mark_clusters(now):
+            if len(group["marks"]) >= MARKS_FOR_A_SPOT:
+                spots.append({"id": group["id"], "camera_id": group["camera_id"], "kind": group["kind"], "box": group["box"], "marks": len(group["marks"]), "expires_at": group["marks"][MARKS_FOR_A_SPOT-1]["created"]+MARK_LIFETIME_SECONDS})
+        return spots
+
+    def in_ignored_spot(self, camera_id, kind, box, now=None):
+        return any(spot["camera_id"] == camera_id and spot["kind"] == kind and overlap(spot["box"], box) >= SAME_SPOT_OVERLAP for spot in self.ignored_spots(now))
+
+    def remove_spot(self, spot_id):
+        with self.lock:
+            for group in self.mark_clusters():
+                if group["id"] == spot_id:
+                    for mark in group["marks"]:
+                        self.execute("DELETE FROM false_marks WHERE id=?", (mark["id"],))
+                    return True
+            return False
 
     def alerts(self, limit=10):
         rows = self.rows(f"SELECT * FROM events WHERE NOT {QUIET} ORDER BY last_seen DESC LIMIT ?", (limit,))
@@ -206,6 +267,7 @@ class Store:
             self.execute("DELETE FROM camera_periods WHERE end<?", (cutoff,))
             self.execute("UPDATE camera_periods SET start=? WHERE start<?", (cutoff, cutoff))
             self.execute("DELETE FROM alert_snoozes WHERE end<?", (cutoff,))
+            self.execute("DELETE FROM false_marks WHERE created<?", (time.time()-MARK_LIFETIME_SECONDS,))
             for row in self.rows(f"SELECT id FROM events WHERE last_seen<? OR ({QUIET} AND last_seen<?)", (cutoff, quiet_cutoff)):
                 self.delete_event(row["id"])
             # Remove orphan media left by a crash between file and database writes.

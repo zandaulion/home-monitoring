@@ -180,6 +180,122 @@ def test_storage_limit_removes_quiet_events_before_older_alerts(tmp_path):
     store.db.close()
 
 
+SPOT = [100, 50, 60, 200]
+
+
+def event_at(store, box=SPOT, reason="sent", score=0.7, state="person", gap=100):
+    store.execute("UPDATE events SET last_seen=last_seen-?", (gap,))
+    event_id = store.record_event("camera-1", state, 1, [], b"x", [], peak_score=score, box=box)
+    store.mark_alert(event_id, reason)
+    return event_id
+
+
+def teach(client, store, count=2):
+    results = []
+    for _ in range(count):
+        results.append(client.post(f"/api/events/{event_at(store)}/false-positive", headers=OWNER).json())
+    return results
+
+
+def test_marking_moves_an_alert_out_and_undo_restores_it(setup):
+    client, store, engine = setup
+    eid = event_at(store)
+    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": True, "spot": False}
+    home = client.get("/api/alerts", headers=OWNER).json()
+    assert home["alerts"] == [] and home["quiet"]["total"] == 1
+    assert client.delete(f"/api/events/{eid}/false-positive", headers=OWNER).status_code == 200
+    assert [event["alert_reason"] for event in client.get("/api/alerts", headers=OWNER).json()["alerts"]] == ["sent"]
+    assert not store.rows("SELECT id FROM false_marks")
+    assert client.post(f"/api/events/{'0'*32}/false-positive", headers=OWNER).status_code == 404
+    assert client.post(f"/api/events/{eid}/false-positive", headers=COLLECTOR).status_code == 401
+
+
+def test_one_mark_is_not_a_spot_and_two_are(setup):
+    client, store, engine = setup
+    assert [result["spot"] for result in teach(client, store)] == [False, True]
+    spots = client.get("/api/spots", headers=OWNER).json()
+    assert len(spots) == 1 and spots[0]["marks"] == 2 and spots[0]["kind"] == "person"
+
+
+def test_event_without_a_position_teaches_nothing(setup):
+    client, store, engine = setup
+    eid = event_at(store, box=None)
+    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": False, "spot": False}
+    assert not store.rows("SELECT id FROM false_marks")
+
+
+def frame(client, jpeg, engine, box, score):
+    engine.people = [{"box": box, "score": score}]
+    time.sleep(0.51)
+    return client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR).json()
+
+
+def test_spot_quiets_detections_there_but_not_clear_or_elsewhere(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    teach(client, store)
+    store.execute("UPDATE events SET last_seen=last_seen-200")
+    frame(client, jpeg, engine, SPOT, 0.72)
+    assert alerts(store) == 0 and store.events()[0]["alert_reason"] == "quiet"
+    store.execute("UPDATE events SET last_seen=last_seen-200")
+    frame(client, jpeg, engine, SPOT, 0.85)
+    assert alerts(store) == 1
+    store.execute("DELETE FROM push_cooldown")
+    store.execute("UPDATE events SET last_seen=last_seen-200")
+    frame(client, jpeg, engine, [400, 50, 60, 200], 0.72)
+    assert alerts(store) == 2
+
+
+def test_person_beside_the_spot_is_not_hidden_by_it(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    teach(client, store)
+    store.execute("UPDATE events SET last_seen=last_seen-200")
+    engine.people = [{"box": SPOT, "score": 0.7}, {"box": [400, 50, 60, 200], "score": 0.72}]
+    client.post("/api/ingest/camera-1/frame", content=jpeg, headers=COLLECTOR)
+    assert alerts(store) == 1
+
+
+def test_person_arriving_after_a_mark_is_a_new_event(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    eid = frame(client, jpeg, engine, SPOT, 0.7)["event_id"]
+    client.post(f"/api/events/{eid}/false-positive", headers=OWNER)
+    assert frame(client, jpeg, engine, [400, 50, 60, 200], 0.7)["event_id"] != eid
+
+
+def test_marking_cancels_a_queued_notification(setup, jpeg):
+    client, store, engine = setup
+    person_only(client, store)
+    eid = frame(client, jpeg, engine, SPOT, 0.9)["event_id"]
+    client.post(f"/api/events/{eid}/false-positive", headers=OWNER)
+    assert store.rows("SELECT state FROM push_jobs")[0]["state"] == "cancelled"
+
+
+def test_marks_expire_and_a_spot_can_be_removed(setup):
+    client, store, engine = setup
+    teach(client, store)
+    spot = client.get("/api/spots", headers=OWNER).json()[0]
+    assert client.delete("/api/spots/99999", headers=OWNER).status_code == 404
+    assert client.delete(f"/api/spots/{spot['id']}", headers=OWNER).status_code == 200
+    assert client.get("/api/spots", headers=OWNER).json() == []
+    teach(client, store)
+    assert store.ignored_spots(time.time()+31*86400) == []
+    store.execute("UPDATE false_marks SET created=?", (time.time()-31*86400,))
+    store.cleanup()
+    assert not store.rows("SELECT id FROM false_marks")
+
+
+def test_spots_are_separate_for_each_kind_and_survive_their_events(setup):
+    client, store, engine = setup
+    teach(client, store)
+    assert not store.in_ignored_spot("camera-1", "vehicle", SPOT)
+    assert store.in_ignored_spot("camera-1", "person", SPOT)
+    for event in store.events():
+        store.delete_event(event["id"])
+    assert store.in_ignored_spot("camera-1", "person", SPOT)
+
+
 def test_confident_person_alerts_on_the_first_frame(setup, jpeg):
     client, store, engine = setup
     person_only(client, store)

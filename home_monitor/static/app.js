@@ -16,7 +16,7 @@ const labels = {person:'Person', vehicle:'Vehicle', animal:'Animal', known:'Reco
 const personOnly = () => status ? !status.settings.recognition_enabled : false;
 const objectEvent = event => ['vehicle','animal'].includes(event.state);
 const shownState = event => personOnly() && !objectEvent(event) ? 'person' : event.state;
-const silenced = {cooldown:'No notification: cooldown', snoozed:'No notification: snoozed', disarmed:'No notification: alerts off', no_device:'No notification: no device'};
+const silenced = {false:'Marked not a person', cooldown:'No notification: cooldown', snoozed:'No notification: snoozed', disarmed:'No notification: alerts off', no_device:'No notification: no device'};
 function clockTime(timestamp) {
   const when = new Date(timestamp*1000), today = new Date(), yesterday = new Date(); yesterday.setDate(today.getDate()-1);
   const time = when.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
@@ -195,6 +195,25 @@ function renderSettings() {
   $('#recording-status').hidden = !recording.configured;
   $('#recording-status').textContent = recording.stopped.length ? `Video recording has stopped: ${recording.stopped.join(', ')}.` : 'Video recording is working on all cameras.';
   renderNotifications();
+  renderSpots();
+}
+
+async function renderSpots() {
+  try {
+    const spots = await api('/spots');
+    const target = $('#ignored-spots');
+    target.innerHTML = spots.length ? spots.map(spot => {
+      const camera = status.cameras.find(item => item.id === spot.camera_id);
+      return `<div class="spot-row"><div class="spot-view" data-box="${spot.box.join(',')}" data-size="${camera?.width || 640},${camera?.height || 368}"><img src="/api/cameras/${esc(spot.camera_id)}/image?v=${Math.floor(Date.now()/60000)}" alt="${esc(camera?.name || '')} snapshot" loading="lazy"><span></span></div><div class="spot-text"><strong>${esc(camera?.name || spot.camera_id)}</strong><small>${labels[spot.kind]} · ${spot.marks} marks · until ${esc(new Date(spot.expires_at*1000).toLocaleDateString([], {day:'numeric', month:'short'}))}</small></div><button type="button" class="button secondary" data-spot="${spot.id}">Remove</button></div>`;
+    }).join('') : '<p class="subtle">None yet. Mark two alerts in the same place to add one.</p>';
+    $$('.spot-view', target).forEach(view => {
+      const [x, y, w, h] = view.dataset.box.split(',').map(Number), [width, height] = view.dataset.size.split(',').map(Number), mark = $('span', view);
+      Object.assign(mark.style, {left:`${x/width*100}%`, top:`${y/height*100}%`, width:`${w/width*100}%`, height:`${h/height*100}%`});
+    });
+    $$('[data-spot]', target).forEach(button => button.addEventListener('click', async () => {
+      try { await api(`/spots/${button.dataset.spot}`, {method:'DELETE'}); toast('Spot removed.'); renderSpots(); } catch (error) { toast(error.message); }
+    }));
+  } catch {}
 }
 
 function pushSupported() {
@@ -296,7 +315,29 @@ function showPersonEvent(event) {
   wireEvent(event);
 }
 
+async function setFalseAlert(event, wrong, button) {
+  const name = objectEvent(event) ? 'false alert' : 'not a person';
+  button.disabled = true;
+  try {
+    if (wrong) {
+      const result = await api(`/events/${event.id}/false-positive`, {method:'POST'});
+      toast(result.spot ? 'Marked. Weak detections in this spot will stay quiet.' : result.learned ? 'Marked. A second mark here will quiet this spot.' : `Marked as ${name}. This older event has no position to learn from.`);
+    } else {
+      await api(`/events/${event.id}/false-positive`, {method:'DELETE'});
+      toast('Mark removed.');
+    }
+    closeModal(); await refresh();
+    if (page === 'events') await loadEvents(true);
+  } catch (error) { toast(error.message); button.disabled = false; }
+}
+
 function wireEvent(event) {
+  const wrong = document.createElement('button');
+  const marked = event.alert_reason === 'false';
+  wrong.className = 'button secondary';
+  wrong.textContent = marked ? 'Undo mark' : objectEvent(event) ? 'False alert' : 'Not a person';
+  wrong.addEventListener('click', () => setFalseAlert(event, !marked, wrong));
+  $('#delete-event').before(wrong);
   const recording = document.createElement('div');
   recording.dataset.eventVideo = event.id;
   $('#event-photo').after(recording);

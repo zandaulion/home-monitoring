@@ -32,6 +32,7 @@ LOG = logging.getLogger("home_monitor")
 MAX_CLIP_SECONDS = 300
 CONFIDENT_PERSON_SCORE = 0.65
 SAME_PLACE_OVERLAP = 0.7
+ALWAYS_ALERT_SCORE = 0.8
 SECOND_SIGHTING_SECONDS = 8
 RECORDING_WINDOW_SECONDS = 600
 
@@ -401,6 +402,28 @@ def create_app(config=None, vision=None, push_sender=None):
     def events(camera: str | None = None, state: str | None = None, before: float | None = None, limit: int = 60):
         return store.events(camera, state, before, max(1, min(limit, 100)))
 
+    @app.post("/api/events/{event_id}/false-positive")
+    def mark_false_positive(event_id: str):
+        result = store.mark_false(valid_id(event_id))
+        if result is None:
+            raise HTTPException(404, "Event not found")
+        return result
+
+    @app.delete("/api/events/{event_id}/false-positive")
+    def unmark_false_positive(event_id: str):
+        store.unmark_false(valid_id(event_id))
+        return {"ok": True}
+
+    @app.get("/api/spots")
+    def spots():
+        return store.ignored_spots()
+
+    @app.delete("/api/spots/{spot_id}")
+    def remove_spot(spot_id: int):
+        if not store.remove_spot(spot_id):
+            raise HTTPException(404, "Spot not found")
+        return {"ok": True}
+
     @app.get("/api/alerts")
     def alerts():
         return {"alerts": store.alerts(), "quiet": store.quiet_summary(time.time() - 86400)}
@@ -729,11 +752,16 @@ def create_app(config=None, vision=None, push_sender=None):
             for face in face_rows:
                 x, y, bw, bh = face["box"]
                 cv2.rectangle(annotated, (x, y), (x + bw, y + bh), (120, 210, 150) if face["person_id"] else (80, 180, 235), 2)
-            score = photo_score(frame, result["people"] or moving, face_rows)
-            peak_score = max((person.get("score", 1.0) for person in result["people"]), default=0.0)
-            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score, peak_score)
+            detections = result["people"] or moving
+            score = photo_score(frame, detections, face_rows)
+            peak_score = max((item.get("score", 1.0) for item in detections), default=0.0)
+            strongest = max(detections, key=lambda item: item.get("score", 1.0), default=None)
+            event_id = store.record_event(camera_id, state, person_count, face_rows, engine.jpeg(annotated), crops, now, score, peak_score, strongest["box"] if strongest else None)
+            kind = state if state in {"vehicle", "animal"} else "person"
+            # A clear detection always alerts, and anyone outside the spot counts as usual.
+            ignored = bool(detections) and peak_score < ALWAYS_ALERT_SCORE and all(store.in_ignored_spot(camera_id, kind, item["box"], now) for item in detections)
             if state in {"vehicle", "animal"}:
-                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if settings[f"alert_{state}s"] else "quiet")
+                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if settings[f"alert_{state}s"] and not ignored else "quiet")
                 return {"ok": True, "people": 0, "event_id": event_id, "state": state}
             previous_at, count, previous_box = unidentified_observations.get(camera_id, (0, 0, None))
             if state in ALERTING_STATES:
@@ -746,7 +774,7 @@ def create_app(config=None, vision=None, push_sender=None):
                 # A weak detection needs a second sighting somewhere else. Either way
                 # the event and its video are recorded.
                 confident = not recognition and peak_score >= CONFIDENT_PERSON_SCORE
-                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if count >= 2 or confident else "quiet")
+                store.mark_alert(event_id, push.enqueue_event(camera_id, event_id) if (count >= 2 or confident) and not ignored else "quiet")
             else:
                 unidentified_observations.pop(camera_id, None)
                 store.mark_alert(event_id, "quiet")

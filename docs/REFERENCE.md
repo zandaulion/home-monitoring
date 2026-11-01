@@ -227,6 +227,15 @@ stationary detections are quiet: the overview counts them per camera for the las
 24 hours, and Activity can filter by either. Quiet events are kept for two days at
 most and are removed first when storage runs short, so they cannot push out alerts.
 
+**Marking wrong alerts.** An event can be marked Not a person (False alert for a
+vehicle or animal), which moves it to the quiet group on all devices and can be
+undone. The model cannot learn from a few marks, so the place is remembered: after
+two marks in the same spot on a camera, weak detections of that kind there stay
+quiet but are still recorded with their video. A detection of 0.8 or higher always
+alerts, anyone outside the spot counts as usual, and marks expire after 30 days.
+Only a box and a score are kept once the event itself has expired. Settings lists
+the spots. Events from before positions were stored can be marked but teach nothing.
+
 **When alerts fire.** Person alerts can be always on, limited to a daily schedule
 in the time zone of the device that saved it, or off. A schedule can cross
 midnight. Away mode turns alerts on regardless, from the app's Away button or
