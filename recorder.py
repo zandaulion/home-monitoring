@@ -28,6 +28,7 @@ CLIP_BEFORE = 22
 CLIP_AFTER = 23
 SETTLE_SECONDS = 28  # Footage reaches the buffer late, and the last file stays open.
 GIVE_UP_WAITING = 50
+USB_CLIP_DAYS = 30
 FIRST_CLIP_AFTER = 45  # Evidence leaves the house before a long visit ends.
 SEGMENT_GAP = 12
 STALL_SECONDS = 45
@@ -85,13 +86,13 @@ def trim_buffer(folder, now):
         path.unlink(missing_ok=True)
 
 
-def prune_usb(root, now, retention_seconds, reserve_bytes):
+def prune_usb(root, now, retention_seconds, reserve_bytes, clip_days=USB_CLIP_DAYS):
     """Expire clips; also clear footage left by the earlier continuous recorder."""
     for path in (p for p in root.glob('*/*') if p.is_file() and p.parent.name != 'clips'):
         if now-path.stat().st_mtime > retention_seconds:
             path.unlink(missing_ok=True)
     for path in sorted(root.glob('clips/*/*.mp4'), key=lambda p: p.stat().st_mtime):
-        if now-path.stat().st_mtime > 7*86400 or shutil.disk_usage(root).free < reserve_bytes:
+        if now-path.stat().st_mtime > clip_days*86400 or shutil.disk_usage(root).free < reserve_bytes:
             path.unlink(missing_ok=True)
 
 
@@ -226,7 +227,7 @@ def save_to_usb(config, saves):
             now = time.time()
             if now-pruned > 300 and mount.is_mount():
                 pruned = now
-                prune_usb(root, now, config['recording'].get('retention_hours', 24)*3600, config['recording'].get('reserve_mb', 3072)*1024**2)
+                prune_usb(root, now, config['recording'].get('retention_hours', 24)*3600, config['recording'].get('reserve_mb', 3072)*1024**2, config['recording'].get('clip_days', USB_CLIP_DAYS))
         except Exception as error:
             LOG.warning('USB save skipped (%s)', type(error).__name__)
 

@@ -92,3 +92,16 @@ def test_usb_prune_expires_clips_and_old_continuous_footage(tmp_path, monkeypatc
     monkeypatch.setattr(recorder.shutil, 'disk_usage', lambda _: disk(1000, 1, 999))
     recorder.prune_usb(tmp_path, now=9_000_100, retention_seconds=86400, reserve_bytes=100)
     assert not old.exists() and not clip.exists() and fresh.exists()
+
+
+def test_usb_clips_last_for_the_configured_days(tmp_path, monkeypatch):
+    clip = tmp_path / 'clips' / 'camera-test' / 'a.mp4'
+    clip.parent.mkdir(parents=True)
+    clip.touch()
+    os.utime(clip, (0, 0))
+    disk = namedtuple('Disk', 'total used free')
+    monkeypatch.setattr(recorder.shutil, 'disk_usage', lambda _: disk(1000, 1, 999))
+    recorder.prune_usb(tmp_path, now=29*86400, retention_seconds=86400, reserve_bytes=100)
+    assert clip.exists()
+    recorder.prune_usb(tmp_path, now=31*86400, retention_seconds=86400, reserve_bytes=100)
+    assert not clip.exists()

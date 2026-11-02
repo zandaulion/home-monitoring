@@ -180,7 +180,7 @@ def test_storage_limit_removes_quiet_events_before_older_alerts(tmp_path):
     store.db.close()
 
 
-SPOT = [100, 50, 60, 200]
+SPOT = [100, 50, 40, 100]
 
 
 def event_at(store, box=SPOT, reason="sent", score=0.7, state="person", gap=100):
@@ -200,7 +200,7 @@ def teach(client, store, count=2):
 def test_marking_moves_an_alert_out_and_undo_restores_it(setup):
     client, store, engine = setup
     eid = event_at(store)
-    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": True, "spot": False}
+    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": True, "spot": False, "too_large": False}
     home = client.get("/api/alerts", headers=OWNER).json()
     assert home["alerts"] == [] and home["quiet"]["total"] == 1
     assert client.delete(f"/api/events/{eid}/false-positive", headers=OWNER).status_code == 200
@@ -220,7 +220,7 @@ def test_one_mark_is_not_a_spot_and_two_are(setup):
 def test_event_without_a_position_teaches_nothing(setup):
     client, store, engine = setup
     eid = event_at(store, box=None)
-    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": False, "spot": False}
+    assert client.post(f"/api/events/{eid}/false-positive", headers=OWNER).json() == {"learned": False, "spot": False, "too_large": False}
     assert not store.rows("SELECT id FROM false_marks")
 
 
@@ -244,6 +244,31 @@ def test_spot_quiets_detections_there_but_not_clear_or_elsewhere(setup, jpeg):
     store.execute("UPDATE events SET last_seen=last_seen-200")
     frame(client, jpeg, engine, [400, 50, 60, 200], 0.72)
     assert alerts(store) == 2
+
+
+def test_very_large_boxes_never_teach_a_spot(setup):
+    client, store, engine = setup
+    wide = [300, 0, 187, 227]
+    results = [client.post(f"/api/events/{event_at(store, box=wide)}/false-positive", headers=OWNER).json() for _ in range(2)]
+    assert results[-1] == {"learned": False, "spot": False, "too_large": True}
+    assert not store.rows("SELECT id FROM false_marks") and store.ignored_spots() == []
+    assert not client.get("/api/alerts", headers=OWNER).json()["alerts"]
+
+
+def test_existing_large_marks_stop_counting(setup):
+    client, store, engine = setup
+    wide = json.dumps([300, 0, 187, 227])
+    for number in range(2):
+        store.execute("INSERT INTO false_marks(camera_id,kind,box,score,event_id,created) VALUES('camera-1','person',?,0.7,?,?)", (wide, f"old-{number}", time.time()))
+    assert store.ignored_spots() == []
+
+
+def test_large_share_uses_the_camera_frame(setup):
+    client, store, engine = setup
+    box = [0, 0, 187, 227]
+    assert not store.learnable("camera-1", box)
+    store.execute("UPDATE cameras SET width=1920,height=1080")
+    assert store.learnable("camera-1", box)
 
 
 def test_person_beside_the_spot_is_not_hidden_by_it(setup, jpeg):

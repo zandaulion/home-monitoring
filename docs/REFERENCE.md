@@ -233,7 +233,9 @@ undone. The model cannot learn from a few marks, so the place is remembered: aft
 two marks in the same spot on a camera, weak detections of that kind there stay
 quiet but are still recorded with their video. A detection of 0.8 or higher always
 alerts, anyone outside the spot counts as usual, and marks expire after 30 days.
-Only a box and a score are kept once the event itself has expired. Settings lists
+A box covering more than a tenth of the frame teaches nothing, because it would
+silence an area rather than a spot. Only a box and a score are kept once the event
+itself has expired. Settings lists
 the spots. Events from before positions were stored can be marked but teach nothing.
 
 **When alerts fire.** Person alerts can be always on, limited to a daily schedule

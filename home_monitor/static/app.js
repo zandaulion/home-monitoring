@@ -321,7 +321,7 @@ async function setFalseAlert(event, wrong, button) {
   try {
     if (wrong) {
       const result = await api(`/events/${event.id}/false-positive`, {method:'POST'});
-      toast(result.spot ? 'Marked. Weak detections in this spot will stay quiet.' : result.learned ? 'Marked. A second mark here will quiet this spot.' : `Marked as ${name}. This older event has no position to learn from.`);
+      toast(result.too_large ? 'Marked. That detection is too large to learn a spot from.' : result.spot ? 'Marked. Weak detections in this spot will stay quiet.' : result.learned ? 'Marked. A second mark here will quiet this spot.' : `Marked as ${name}. This older event has no position to learn from.`);
     } else {
       await api(`/events/${event.id}/false-positive`, {method:'DELETE'});
       toast('Mark removed.');

@@ -16,6 +16,7 @@ QUIET = "COALESCE(alert_reason,'quiet') IN ('quiet','false')"
 MARK_LIFETIME_SECONDS = 30 * 86400
 MARKS_FOR_A_SPOT = 2
 SAME_SPOT_OVERLAP = 0.5
+LARGEST_LEARNED_SHARE = 0.10  # A big box would silence a whole area, not a spot.
 
 
 def write_image(path, data):
@@ -193,24 +194,33 @@ class Store:
             if event["alert_reason"] != "false":
                 self.execute("UPDATE events SET reason_before=alert_reason,alert_reason='false' WHERE id=?", (event_id,))
                 self.execute("UPDATE push_jobs SET state='cancelled' WHERE event_id=? AND state='pending'", (event_id,))
-                if event["box"]:
+                if event["box"] and self.learnable(event["camera_id"], json.loads(event["box"])):
                     kind = event["state"] if event["state"] in {"vehicle", "animal"} else "person"
                     self.execute("INSERT OR IGNORE INTO false_marks(camera_id,kind,box,score,event_id,created) VALUES(?,?,?,?,?,?)", (event["camera_id"], kind, event["box"], event["peak_score"], event_id, time.time()))
             if not event["box"]:
-                return {"learned": False, "spot": False}
+                return {"learned": False, "spot": False, "too_large": False}
+            if not self.learnable(event["camera_id"], json.loads(event["box"])):
+                return {"learned": False, "spot": False, "too_large": True}
             kind = event["state"] if event["state"] in {"vehicle", "animal"} else "person"
-            return {"learned": True, "spot": self.in_ignored_spot(event["camera_id"], kind, json.loads(event["box"]))}
+            return {"learned": True, "spot": self.in_ignored_spot(event["camera_id"], kind, json.loads(event["box"])), "too_large": False}
 
     def unmark_false(self, event_id):
         with self.lock:
             self.execute("UPDATE events SET alert_reason=reason_before,reason_before=NULL WHERE id=? AND alert_reason='false'", (event_id,))
             self.execute("DELETE FROM false_marks WHERE event_id=?", (event_id,))
 
+    def learnable(self, camera_id, box):
+        size = self.rows("SELECT width,height FROM cameras WHERE id=?", (camera_id,))
+        width, height = (size[0]["width"], size[0]["height"]) if size and size[0]["width"] else (640, 368)
+        return box[2] * box[3] <= LARGEST_LEARNED_SHARE * width * height
+
     def mark_clusters(self, now=None):
         now = time.time() if now is None else now
         clusters = []
         for mark in self.rows("SELECT * FROM false_marks WHERE created>? ORDER BY created DESC", (now-MARK_LIFETIME_SECONDS,)):
             box = json.loads(mark["box"])
+            if not self.learnable(mark["camera_id"], box):
+                continue
             match = next((group for group in clusters if group["camera_id"] == mark["camera_id"] and group["kind"] == mark["kind"] and overlap(group["box"], box) >= SAME_SPOT_OVERLAP), None)
             if match:
                 match["marks"].append(mark)

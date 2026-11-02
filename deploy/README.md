@@ -162,6 +162,7 @@ camera's ONVIF stream URI and the existing username/password fields. Add:
   "buffer": "/tmp/home-monitor",
   "ffmpeg": "/usr/bin/ffmpeg",
   "retention_hours": 24,
+  "clip_days": 30,
   "reserve_mb": 3072
 }
 ```
@@ -169,8 +170,8 @@ camera's ONVIF stream URI and the existing username/password fields. Add:
 The buffer must be on tmpfs, and the recorder refuses to start otherwise. Avoid
 `/dev/shm` unless the user has lingering enabled: systemd removes a user's files
 there when their last session ends. `mount` is
-the optional USB drive that keeps a copy of each clip for seven days; without it,
-clips are stored on the server only.
+the optional USB drive that keeps a copy of each clip for `clip_days`, or less if
+free space falls below `reserve_mb`. Without it, clips are stored on the server only.
 
 Run `python3 recorder.py --config .runtime/collector-config.json` under a service
 or boot watchdog, using `flock` to prevent duplicate instances. Keep a private
@@ -194,6 +195,6 @@ camera that is already offline has its own alert instead.
 A private playback copy is uploaded to the server and appears in the event
 window. It uses the same device authentication and retention/storage limits as
 snapshots, supports seeking, and is excluded from offline caching. USB clips
-expire after seven days or earlier under space pressure; server event deletion
+expire after `clip_days` or earlier under space pressure; server event deletion
 removes the server copy only. Monitoring pause also pauses recording when the
 recorder next reaches the server.
