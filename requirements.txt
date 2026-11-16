@@ -1,5 +1,5 @@
 -c constraints.txt
-fastapi==0.162.0
+fastapi==0.162.5
 uvicorn==0.54.0
 numpy==2.5.4
 opencv-python-headless==5.0.0.93
